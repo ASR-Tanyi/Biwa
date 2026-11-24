@@ -17,5 +17,8 @@ biwa_add_module(core LAYER 0
     SOURCES
         src/error.cpp
         src/file.cpp
+        src/hex.cpp
         src/log.cpp
+        src/sha256.cpp
         ${CMAKE_CURRENT_BINARY_DIR}/gen/version.cpp)
+target_link_libraries(biwa_core PRIVATE MbedTLS::mbedcrypto)

@@ -5,6 +5,18 @@
 include(FetchContent)
 set(FETCHCONTENT_QUIET ON)
 
+# Mbed TLS 3.6.8 (LTS): AES and SHA-256. Only the crypto library is built.
+FetchContent_Declare(mbedtls
+    URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.8/mbedtls-3.6.8.tar.bz2
+    URL_HASH SHA256=bc54b818e87f49c0b3281dd85d24adaede0e63b4e822e3fbd49c005a38b9595b
+    EXCLUDE_FROM_ALL
+    SYSTEM)
+set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(mbedtls)
+
 if(BIWA_BUILD_TESTS)
     # GoogleTest 1.18.0
     FetchContent_Declare(googletest
