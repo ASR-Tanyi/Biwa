@@ -1,0 +1,81 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}"
+    },
+    {
+      "name": "linux-base",
+      "hidden": true,
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "linux-debug",
+      "displayName": "Linux debug",
+      "inherits": "linux-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "linux-asan",
+      "displayName": "Linux, AddressSanitizer + UBSan",
+      "inherits": "linux-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "BIWA_SANITIZE": "address,undefined" }
+    },
+    {
+      "name": "linux-tsan",
+      "displayName": "Linux, ThreadSanitizer",
+      "inherits": "linux-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "BIWA_SANITIZE": "thread" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux-debug", "configurePreset": "linux-debug" },
+    { "name": "linux-asan", "configurePreset": "linux-asan" },
+    { "name": "linux-tsan", "configurePreset": "linux-tsan" }
+  ],
+  "testPresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    { "name": "linux-debug", "inherits": "base", "configurePreset": "linux-debug" },
+    { "name": "linux-asan", "inherits": "base", "configurePreset": "linux-asan" },
+    { "name": "linux-tsan", "inherits": "base", "configurePreset": "linux-tsan" }
+  ],
+  "workflowPresets": [
+    {
+      "name": "linux-debug",
+      "steps": [
+        { "type": "configure", "name": "linux-debug" },
+        { "type": "build", "name": "linux-debug" },
+        { "type": "test", "name": "linux-debug" }
+      ]
+    },
+    {
+      "name": "linux-asan",
+      "steps": [
+        { "type": "configure", "name": "linux-asan" },
+        { "type": "build", "name": "linux-asan" },
+        { "type": "test", "name": "linux-asan" }
+      ]
+    },
+    {
+      "name": "linux-tsan",
+      "steps": [
+        { "type": "configure", "name": "linux-tsan" },
+        { "type": "build", "name": "linux-tsan" },
+        { "type": "test", "name": "linux-tsan" }
+      ]
+    }
+  ]
+}
