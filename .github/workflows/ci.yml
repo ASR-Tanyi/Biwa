@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Biwa contributors
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  LLVM_MINGW_VERSION: "20261117"
+  LLVM_MINGW_SHA256: e7a15a49a2ea95e9f3d8a9d0cfabe5052a4b10fb4777cc54de5a8c27b64bb701
+  LINT_LLVM_VERSION: "23.1.4"
+
+jobs:
+  linux:
+    name: ${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [linux-debug, linux-asan, linux-tsan]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+      - name: Lower ASLR entropy for ThreadSanitizer
+        if: matrix.preset == 'linux-tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Build and test
+        run: cmake --workflow --preset ${{ matrix.preset }}
+
+  cross:
+    name: ${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [cross-debug, cross-release]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install Ninja and Wine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build wine64
+          sudo mkdir -p /run/user/$(id -u)
+          sudo chown $(id -u):$(id -g) /run/user/$(id -u)
+          chmod 700 /run/user/$(id -u)
+      - name: Install llvm-mingw ${{ env.LLVM_MINGW_VERSION }}
+        run: |
+          name=llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64
+          curl -sSfL -o /tmp/llvm-mingw.tar.xz \
+            https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${name}.tar.xz
+          echo "${LLVM_MINGW_SHA256}  /tmp/llvm-mingw.tar.xz" | sha256sum -c -
+          sudo tar -C /opt -xf /tmp/llvm-mingw.tar.xz
+          echo "BIWA_LLVM_MINGW=/opt/${name}" >> "$GITHUB_ENV"
+      - name: Build and test under Wine
+        run: cmake --workflow --preset ${{ matrix.preset }}
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-18
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+          python3 -m venv /opt/lint
+          /opt/lint/bin/pip install clang-format==${LINT_LLVM_VERSION} clang-tidy==${LINT_LLVM_VERSION}
+          echo /opt/lint/bin >> "$GITHUB_PATH"
+      - name: Format check and clang-tidy
+        run: cmake --workflow --preset lint
