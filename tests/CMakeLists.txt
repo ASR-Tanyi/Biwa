@@ -13,7 +13,9 @@ function(biwa_add_test name)
     gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST)
 endfunction()
 
-biwa_add_test(core_test SOURCES core/version_test.cpp DEPS core)
+biwa_add_test(core_test
+    SOURCES core/error_test.cpp core/version_test.cpp
+    DEPS core)
 target_compile_definitions(core_test PRIVATE BIWA_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
 
 biwa_add_test(cli_test SOURCES cli/run_test.cpp DEPS cli)

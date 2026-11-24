@@ -14,4 +14,6 @@ endif()
 configure_file(src/version.cpp.in ${CMAKE_CURRENT_BINARY_DIR}/gen/version.cpp @ONLY)
 
 biwa_add_module(core LAYER 0
-    SOURCES ${CMAKE_CURRENT_BINARY_DIR}/gen/version.cpp)
+    SOURCES
+        src/error.cpp
+        ${CMAKE_CURRENT_BINARY_DIR}/gen/version.cpp)
