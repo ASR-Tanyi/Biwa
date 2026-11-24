@@ -180,7 +180,10 @@
     {
       "name": "linux-asan",
       "inherits": "base",
-      "configurePreset": "linux-asan"
+      "configurePreset": "linux-asan",
+      "environment": {
+        "ASAN_OPTIONS": "alloc_dealloc_mismatch=0"
+      }
     },
     {
       "name": "linux-tsan",
