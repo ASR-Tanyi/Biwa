@@ -14,7 +14,7 @@ function(biwa_add_test name)
 endfunction()
 
 biwa_add_test(core_test
-    SOURCES core/error_test.cpp core/version_test.cpp
+    SOURCES core/error_test.cpp core/log_test.cpp core/version_test.cpp
     DEPS core)
 target_compile_definitions(core_test PRIVATE BIWA_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
 
