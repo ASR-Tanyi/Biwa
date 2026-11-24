@@ -38,7 +38,14 @@ MSYS2 can be the shell on Windows (git, cmake, ninja from pacman), but the compi
 ## Repository layout
 
 ```
-CMakeLists.txt  CMakePresets.json  cmake/Dependencies.cmake
+CMakeLists.txt  CMakePresets.json
+cmake/
+  BiwaOptions.cmake           warnings, sanitizers, clang-tidy hook
+  BiwaModule.cmake            biwa_add_module(): one static library per module, layer-checked
+  BiwaFormat.cmake            biwa_format, biwa_format_check
+  Dependencies.cmake          every third-party project, pinned by SHA-256
+  toolchains/llvm-mingw.cmake Windows builds, native and cross
+.github/workflows/ci.yml      CI
 docs/design/                  this design
 games/<title id>.json         per-game profiles
 src/
@@ -58,6 +65,23 @@ third_party/
 tests/          unit tests, homebrew test programs (AArch64 assembly), GPU image tests
 ```
 
+Each module keeps its public headers in `src/<module>/include/biwa/<module>/` (included as `"biwa/<module>/…"`) and its sources in `src/<module>/src/`. Every source file starts with an SPDX licence line.
+
+## Module graph
+
+Every module is a static library `biwa::<module>` made with `biwa_add_module(<name> LAYER <n> …)`. A module may depend only on modules of a **lower** layer; CMake refuses anything else at configure time, so the graph cannot grow cycles or shortcuts.
+
+| Layer | Modules | May use |
+|---|---|---|
+| 0 | `core` | Third-party libraries only |
+| 1 | `nx`, `a64`, `platform` | `core` |
+| 2 | `lift`, `shader`, `audio`, `media` | Layers 0–1 (`lift`: `a64`, `nx`; `shader`: the ported recompiler) |
+| 3 | `gpu` | Layers 0–2 (`shader`, `platform`) |
+| 4 | `rt` | Layers 0–3 |
+| 5 | `cli` (the `biwa` command) | Everything |
+
+Generated module DLLs use none of these: they include only the C header that defines the runtime–module interface (`biwa_module_init`, `BiwaRuntimeApi`), which lives in `rt` and is plain C17.
+
 ## How a game is built
 
 `biwa build <work folder>` drives everything after extraction:
@@ -72,7 +96,8 @@ tests/          unit tests, homebrew test programs (AArch64 assembly), GPU image
 ## CI
 
 - Commits stay small, one step each.
-- GitHub Actions: `linux-debug` + tests, `linux-asan`, `linux-tsan`, `cross-release` + tests under Wine, and `lint`. A native Windows job (llvm-mingw on a Windows runner) can be added when the runtime first runs there.
+- GitHub Actions (`.github/workflows/ci.yml`): `linux-debug`, `linux-asan`, `linux-tsan`, `cross-debug` and `cross-release` with tests under Wine, and `lint`. A native Windows job (llvm-mingw on a Windows runner) can be added when the runtime first runs there.
+- Each preset has a workflow, so CI and a local check run the same command: `cmake --workflow --preset <name>`.
 
 ## Open questions
 

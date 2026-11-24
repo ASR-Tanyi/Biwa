@@ -4,7 +4,17 @@ Biwa turns Nintendo Switch games into native **Windows x64** programs. It recomp
 
 The core is game-agnostic: what one game needs beyond it lives in a small per-game profile.
 
-Status: design. Nothing builds yet.
+Status: early. The design is written; the build skeleton and the `biwa` command (`version`, `help`) exist.
+
+## Building
+
+| Host | Needs | Command |
+|---|---|---|
+| Windows | [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) 20261117 (UCRT) on `PATH` or in `BIWA_LLVM_MINGW`, CMake ≥ 3.28, Ninja | `cmake --workflow --preset win-debug` |
+| Linux | Clang ≥ 18, CMake ≥ 3.28, Ninja | `cmake --workflow --preset linux-debug` |
+| Linux → Windows | llvm-mingw in `BIWA_LLVM_MINGW`, Wine | `cmake --workflow --preset cross-debug` |
+
+Each workflow configures, builds and runs the tests. Other presets: `win-release`, `cross-release`, `linux-asan`, `linux-tsan`, `lint`.
 
 ## What it is made of
 
