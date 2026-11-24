@@ -13,6 +13,7 @@ namespace biwa::cli {
 // (docs/design/03-extract.md).
 inline constexpr int kExitOk = 0;
 inline constexpr int kExitUsage = 1;
+inline constexpr int kExitInternal = 70;  // a bug in Biwa (an exception reached main)
 
 // Runs the biwa command line. `args` excludes the program name. Normal output goes to `out`,
 // errors and usage text to `err`. Returns the process exit code.
