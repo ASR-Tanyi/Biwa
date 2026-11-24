@@ -19,6 +19,11 @@
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
       }
     },
     {
@@ -48,6 +53,64 @@
       }
     },
     {
+      "name": "mingw-base",
+      "hidden": true,
+      "inherits": "base",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/llvm-mingw.cmake"
+    },
+    {
+      "name": "win-base",
+      "hidden": true,
+      "inherits": "mingw-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "win-debug",
+      "displayName": "Windows debug (llvm-mingw)",
+      "inherits": "win-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "win-release",
+      "displayName": "Windows release with debug info (llvm-mingw)",
+      "inherits": "win-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "cross-base",
+      "hidden": true,
+      "inherits": "mingw-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "cross-debug",
+      "displayName": "Windows debug, cross-built on Linux (llvm-mingw, tests under Wine)",
+      "inherits": "cross-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "cross-release",
+      "displayName": "Windows release, cross-built on Linux (llvm-mingw, tests under Wine)",
+      "inherits": "cross-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
       "name": "lint",
       "displayName": "Lint: clang-tidy on every Biwa target, format check",
       "inherits": "linux-base",
@@ -69,6 +132,22 @@
     {
       "name": "linux-tsan",
       "configurePreset": "linux-tsan"
+    },
+    {
+      "name": "win-debug",
+      "configurePreset": "win-debug"
+    },
+    {
+      "name": "win-release",
+      "configurePreset": "win-release"
+    },
+    {
+      "name": "cross-debug",
+      "configurePreset": "cross-debug"
+    },
+    {
+      "name": "cross-release",
+      "configurePreset": "cross-release"
     },
     {
       "name": "lint",
@@ -104,6 +183,34 @@
       "name": "linux-tsan",
       "inherits": "base",
       "configurePreset": "linux-tsan"
+    },
+    {
+      "name": "wine",
+      "hidden": true,
+      "inherits": "base",
+      "environment": {
+        "WINEDEBUG": "-all"
+      }
+    },
+    {
+      "name": "win-debug",
+      "inherits": "base",
+      "configurePreset": "win-debug"
+    },
+    {
+      "name": "win-release",
+      "inherits": "base",
+      "configurePreset": "win-release"
+    },
+    {
+      "name": "cross-debug",
+      "inherits": "wine",
+      "configurePreset": "cross-debug"
+    },
+    {
+      "name": "cross-release",
+      "inherits": "wine",
+      "configurePreset": "cross-release"
     }
   ],
   "workflowPresets": [
@@ -155,6 +262,74 @@
         {
           "type": "test",
           "name": "linux-tsan"
+        }
+      ]
+    },
+    {
+      "name": "win-debug",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "win-debug"
+        },
+        {
+          "type": "build",
+          "name": "win-debug"
+        },
+        {
+          "type": "test",
+          "name": "win-debug"
+        }
+      ]
+    },
+    {
+      "name": "win-release",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "win-release"
+        },
+        {
+          "type": "build",
+          "name": "win-release"
+        },
+        {
+          "type": "test",
+          "name": "win-release"
+        }
+      ]
+    },
+    {
+      "name": "cross-debug",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "cross-debug"
+        },
+        {
+          "type": "build",
+          "name": "cross-debug"
+        },
+        {
+          "type": "test",
+          "name": "cross-debug"
+        }
+      ]
+    },
+    {
+      "name": "cross-release",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "cross-release"
+        },
+        {
+          "type": "build",
+          "name": "cross-release"
+        },
+        {
+          "type": "test",
+          "name": "cross-release"
         }
       ]
     },
