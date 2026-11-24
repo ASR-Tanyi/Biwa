@@ -27,6 +27,7 @@ option(BIWA_BUILD_TESTS "Build Biwa's tests" ON)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(BiwaOptions)
 include(BiwaModule)
+include(BiwaFormat)
 include(Dependencies)
 
 add_subdirectory(src)

@@ -1,0 +1,4 @@
+# Checked with clang-format 23.1.4 (the lint preset's pin).
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 120

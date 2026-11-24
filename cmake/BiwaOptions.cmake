@@ -3,6 +3,9 @@
 
 option(BIWA_WERROR "Treat warnings in Biwa's own code as errors" ON)
 set(BIWA_SANITIZE "" CACHE STRING "Sanitizers for every target, e.g. address,undefined or thread")
+set(BIWA_CLANG_TIDY "" CACHE STRING "clang-tidy command run on Biwa's own targets (the lint preset sets it)")
+set(BIWA_CLANG_FORMAT "clang-format" CACHE STRING "clang-format used by the biwa_format targets")
+set(BIWA_LINT_LLVM_VERSION "23.1.4" CACHE INTERNAL "clang-format / clang-tidy version the style is checked with")
 
 # Sanitizers apply globally, so dependencies are instrumented too.
 if(BIWA_SANITIZE)
@@ -17,4 +20,9 @@ function(biwa_warnings target)
         -Wshadow -Wconversion -Wsign-conversion -Wimplicit-fallthrough
         $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor -Wold-style-cast -Woverloaded-virtual>
         $<$<BOOL:${BIWA_WERROR}>:-Werror>)
+    if(BIWA_CLANG_TIDY)
+        set_target_properties(${target} PROPERTIES
+            C_CLANG_TIDY "${BIWA_CLANG_TIDY}"
+            CXX_CLANG_TIDY "${BIWA_CLANG_TIDY}")
+    endif()
 endfunction()
