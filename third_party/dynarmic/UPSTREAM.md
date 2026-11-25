@@ -14,6 +14,11 @@
 
 ## Changes
 
-None: the file is used as it is. `src/a64/CMakeLists.txt` reads its `INST(...)` lines at configure
-time and writes `biwa/a64/ops.inc`, numbering repeated names (`UnallocatedEncoding_2`, ...), so
-every entry gets its own `biwa::a64::Op`.
+- `a64.inc` is used as it is. `src/a64/CMakeLists.txt` reads its `INST(...)` lines at configure
+  time and writes `biwa/a64/ops.inc`, numbering repeated names (`UnallocatedEncoding_2`, ...), so
+  every entry gets its own `biwa::a64::Op`.
+- `a64_extra.inc` holds 16 lines that `a64.inc` has commented out because dynarmic does not
+  implement them, although they are ARMv8.0 instructions: the scalar and vector SQDMLAL, SQDMLSL,
+  SQRSHL and UQRSHL, the scalar SQDMULL, SQRSHRN, SQRSHRUN and UQRSHRN, and SQDMLAL / SQDMLSL by
+  element. They are copied unchanged, without the leading `//`, and appended to the table. The
+  comparison with Capstone over all 2^32 encodings (`tests/a64`) found them.

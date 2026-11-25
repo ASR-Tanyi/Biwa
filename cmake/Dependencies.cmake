@@ -48,4 +48,18 @@ if(BIWA_BUILD_TESTS)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
     include(GoogleTest)
+
+    # Capstone 5.0.9: the reference disassembler the A64 decoder is checked against. Tests only;
+    # only its AArch64 part is built.
+    FetchContent_Declare(capstone
+        URL https://github.com/capstone-engine/capstone/releases/download/5.0.9/capstone-5.0.9.tar.xz
+        URL_HASH SHA256=1b70351879f6998998ebcbe09bd5f3c5e27127e985af14722cbe52c11c35178e
+        EXCLUDE_FROM_ALL
+        SYSTEM)
+    set(CAPSTONE_ARCHITECTURE_DEFAULT OFF CACHE BOOL "" FORCE)
+    set(CAPSTONE_ARM64_SUPPORT ON CACHE BOOL "" FORCE)
+    set(CAPSTONE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(CAPSTONE_BUILD_CSTOOL OFF CACHE BOOL "" FORCE)
+    set(CAPSTONE_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(capstone)
 endif()

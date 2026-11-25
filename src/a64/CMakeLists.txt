@@ -7,10 +7,13 @@
 # turned into BIWA_A64_OP(id, "name", "pattern") lines at configure time; a name that repeats gets
 # a number (UnallocatedEncoding_2, ...) so every entry can be an enumerator.
 set(biwa_a64_inc ${PROJECT_SOURCE_DIR}/third_party/dynarmic/a64.inc)
+set(biwa_a64_extra ${PROJECT_SOURCE_DIR}/third_party/dynarmic/a64_extra.inc)  # ARMv8.0 entries a64.inc leaves out
 set(biwa_a64_ops ${CMAKE_CURRENT_BINARY_DIR}/generated/biwa/a64/ops.inc)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${biwa_a64_inc})
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${biwa_a64_inc} ${biwa_a64_extra})
 file(STRINGS ${biwa_a64_inc} biwa_a64_lines REGEX "^INST\\(")
-set(biwa_a64_text "// Generated from third_party/dynarmic/a64.inc by src/a64/CMakeLists.txt. Do not edit.\n")
+file(STRINGS ${biwa_a64_extra} biwa_a64_extra_lines REGEX "^INST\\(")
+list(APPEND biwa_a64_lines ${biwa_a64_extra_lines})
+set(biwa_a64_text "// Generated from third_party/dynarmic/a64.inc and a64_extra.inc by src/a64/CMakeLists.txt. Do not edit.\n")
 foreach(line IN LISTS biwa_a64_lines)
     if(NOT line MATCHES "^INST\\(([A-Za-z0-9_]+), *(\"[^\"]*\"), *\"([01a-zA-Z-]+)\"\\)")
         message(FATAL_ERROR "a64.inc: cannot read: ${line}")

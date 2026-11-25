@@ -71,7 +71,7 @@ TEST(A64DecoderTest, TheTableIsWellFormed) {
         EXPECT_EQ(info.value & ~info.mask, 0u) << info.id;
         unallocated += info.unallocated ? 1 : 0;
     }
-    EXPECT_EQ(biwa::a64::kOpCount, 643u);
+    EXPECT_EQ(biwa::a64::kOpCount, 643u + 16u);  // a64.inc and a64_extra.inc
     EXPECT_EQ(unallocated, 9u);
 }
 

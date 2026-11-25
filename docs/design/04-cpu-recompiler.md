@@ -26,8 +26,9 @@ flowchart LR
 
 ### Decoder
 
-- Generated from a table of bit patterns, starting from dynarmic's `a64.inc` (0BSD), with each entry naming an instruction and its fields.
-- Checked over all 2^32 encodings against Capstone in a test: every encoding Capstone decodes as an EL0 instruction either decodes in Biwa or is on an explicit "not supported" list.
+- Generated from a table of bit patterns, starting from dynarmic's `a64.inc` (0BSD), with each entry naming an instruction and its fields. `third_party/dynarmic/a64_extra.inc` adds the ARMv8.0 entries `a64.inc` leaves commented out (scalar and vector SQDMLAL, SQDMLSL, SQRSHL, UQRSHL, scalar SQDMULL and the saturating rounding narrows).
+- Checked against Capstone: every encoding Capstone decodes either decodes in Biwa or is on an explicit "not supported" list (`tests/a64/sweep.cpp`), each entry with its reason: an extension after ARMv8.0 (LSE, RDM, pointer authentication, half-precision arithmetic, dot product, MTE, SVE, SME, ...), not available at EL0 (`tlbi`, `at`, `hvc`, system registers outside op0 2–3, ...), `udf`, or bits the architecture says should be one or zero set otherwise (Capstone ignores them; compilers never emit them). `a64_test` checks a spread-out sample of 2^20 encodings on every run; `a64_sweep` checks all 2^32 (about ten minutes on two cores).
+- Biwa's table accepts some encodings Capstone rejects: reserved field values (a vector arrangement that does not exist, a shift type of 3, ...) that the A64 manual makes UNDEFINED. The semantics reject them, so they raise an undefined-instruction exception like on hardware.
 
 ### Semantics: one source of truth
 
