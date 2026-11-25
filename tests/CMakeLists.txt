@@ -7,10 +7,11 @@
 function(biwa_add_test name)
     cmake_parse_arguments(PARSE_ARGV 1 ARG "" "" "SOURCES;DEPS")
     add_executable(${name} ${ARG_SOURCES})
+    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})  # "support/..."
     list(TRANSFORM ARG_DEPS PREPEND biwa::)
     target_link_libraries(${name} PRIVATE ${ARG_DEPS} GTest::gtest_main)
     biwa_warnings(${name})
-    gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST)
+    gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 120)  # Wine can start slowly
 endfunction()
 
 biwa_add_test(core_test
@@ -20,3 +21,7 @@ biwa_add_test(core_test
 target_compile_definitions(core_test PRIVATE BIWA_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
 
 biwa_add_test(cli_test SOURCES cli/run_test.cpp DEPS cli)
+
+biwa_add_test(nx_test
+    SOURCES nx/storage_test.cpp
+    DEPS nx)

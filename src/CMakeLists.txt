@@ -3,4 +3,5 @@
 
 # Modules in layer order (docs/design/01-build-and-toolchain.md, "Module graph").
 add_subdirectory(core)
+add_subdirectory(nx)
 add_subdirectory(tools/biwa)
