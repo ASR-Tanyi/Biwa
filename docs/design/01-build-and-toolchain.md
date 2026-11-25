@@ -64,6 +64,7 @@ src/
   platform/    win32/ (window, XInput, Raw Input, WASAPI) and null/ (tests)
   tools/biwa/  the biwa command (extract, info, lift, build, shaders, run)
 third_party/
+  dynarmic/    a64.inc, the A64 decoder table, 0BSD, see UPSTREAM.md
   yuzu/        shader_recompiler + the common/ headers it needs, GPL-2.0-or-later, see UPSTREAM.md
 tests/          unit tests, homebrew test programs (AArch64 assembly), GPU image tests
 ```
