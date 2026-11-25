@@ -4,6 +4,7 @@
 # Switch formats (docs/design/03-extract.md).
 biwa_add_module(nx LAYER 1
     SOURCES
+        src/content.cpp
         src/crypto.cpp
         src/hash.cpp
         src/keys.cpp

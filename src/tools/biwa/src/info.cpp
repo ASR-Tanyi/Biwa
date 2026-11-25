@@ -6,7 +6,6 @@
 // and checked against its hashes.
 
 #include <format>
-#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -14,12 +13,11 @@
 
 #include "biwa/cli/run.h"
 #include "biwa/core/hex.h"
+#include "biwa/nx/content.h"
 #include "biwa/nx/keys.h"
 #include "biwa/nx/nca.h"
 #include "biwa/nx/pfs0.h"
-#include "biwa/nx/section.h"
 #include "biwa/nx/storage.h"
-#include "biwa/nx/ticket.h"
 #include "commands.h"
 
 namespace biwa::cli {
@@ -65,8 +63,7 @@ Status ReadThrough(const nx::Storage& data) {
 }
 
 void DescribeNca(const nx::Pfs0& nsp, const nx::Pfs0Entry& entry, const nx::KeySet& keys,
-                 const std::map<std::string, nx::Ticket>& tickets, bool verify, std::ostream& out,
-                 FirstError& first) {
+                 const nx::TicketMap& tickets, bool verify, std::ostream& out, FirstError& first) {
     auto fail = [&](const Error& error, std::string_view indent) {
         out << indent << "error: " << error << '\n';
         first.Note(error);
@@ -84,29 +81,13 @@ void DescribeNca(const nx::Pfs0& nsp, const nx::Pfs0Entry& entry, const nx::KeyS
                        header->program_id, header->key_generation,
                        header->HasRightsId() ? "rights ID " + ToHex(header->rights_id) : std::string("no rights ID"));
 
-    std::optional<nx::Aes128Key> key;
-    const auto ticket = tickets.find(ToHex(header->rights_id));
-    const Result<nx::Aes128Key> ctr_key =
-        nx::NcaCtrKey(*header, keys, ticket == tickets.end() ? nullptr : &ticket->second);
-    if (ctr_key) {
-        key = *ctr_key;
-    }
     for (const nx::NcaSection& section : header->sections) {
         out << "    " << SectionLine(section) << '\n';
         const bool list = section.fs_type == nx::NcaFsType::kPartitionFs;
         if (!list && !verify) {
             continue;
         }
-        if (!ctr_key && section.encryption != nx::NcaEncryption::kNone) {
-            fail(ctr_key.error(), "      ");
-            continue;
-        }
-        Result<nx::StoragePtr> decrypted = nx::OpenNcaSection(*storage, section, key);
-        if (!decrypted) {
-            fail(decrypted.error(), "      ");
-            continue;
-        }
-        Result<nx::StoragePtr> data = nx::OpenSectionData(*decrypted, section);
+        Result<nx::StoragePtr> data = nx::OpenSectionFs(*storage, *header, section, keys, tickets);
         if (!data) {
             fail(data.error(), "      ");
             continue;
@@ -188,20 +169,10 @@ int RunInfo(Args args, std::ostream& out, std::ostream& err) {
     }
 
     FirstError first;
-    std::map<std::string, nx::Ticket> tickets;
-    for (const nx::Pfs0Entry& entry : nsp->entries()) {
-        if (!entry.name.ends_with(".tik")) {
-            continue;
-        }
-        Result<nx::StoragePtr> tik = nsp->OpenEntry(entry);
-        Result<nx::Ticket> ticket = tik ? nx::ReadTicket(**tik) : Result<nx::Ticket>(std::unexpected(tik.error()));
-        if (!ticket) {
-            out << "  " << entry.name << ": error: " << ticket.error() << '\n';
-            first.Note(ticket.error());
-            continue;
-        }
-        tickets.emplace(ToHex(ticket->rights_id), *ticket);
-    }
+    const nx::TicketMap tickets = nx::ReadTickets(*nsp, [&](std::string_view name, const Error& error) {
+        out << "  " << name << ": error: " << error << '\n';
+        first.Note(error);
+    });
     for (const nx::Pfs0Entry& entry : nsp->entries()) {
         if (entry.name.ends_with(".nca")) {
             DescribeNca(*nsp, entry, *keys, tickets, verify, out, first);

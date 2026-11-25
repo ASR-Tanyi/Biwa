@@ -23,5 +23,5 @@ target_compile_definitions(core_test PRIVATE BIWA_TEST_PROJECT_VERSION="${PROJEC
 biwa_add_test(cli_test SOURCES cli/run_test.cpp DEPS cli)
 
 biwa_add_test(nx_test
-    SOURCES nx/crypto_test.cpp nx/hash_test.cpp nx/keys_test.cpp nx/nca_test.cpp nx/ticket_test.cpp nx/pfs0_test.cpp nx/romfs_test.cpp nx/section_test.cpp nx/storage_test.cpp
+    SOURCES nx/content_test.cpp nx/crypto_test.cpp nx/hash_test.cpp nx/keys_test.cpp nx/nca_test.cpp nx/ticket_test.cpp nx/pfs0_test.cpp nx/romfs_test.cpp nx/section_test.cpp nx/storage_test.cpp
     DEPS nx)
