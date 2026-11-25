@@ -28,7 +28,8 @@ int RunVersion(Args args, std::ostream& out, std::ostream& err);
 int RunHelp(Args args, std::ostream& out, std::ostream& err);
 
 constexpr std::array kCommands = {
-    Command{"info", "[-k <prod.keys>] <file>", "list what is inside an NSP; with keys, its NCAs too", RunInfo},
+    Command{"info", "[-k <prod.keys>] [--verify] <file>",
+            "list what is inside an NSP; -k adds its NCAs, --verify checks their hashes", RunInfo},
     Command{"version", "", "print Biwa's version", RunVersion},
     Command{"help", "", "print this text", RunHelp},
 };

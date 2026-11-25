@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Biwa contributors
 
-// `biwa info [-k <keys>] <file>`: what is inside an NSP. With keys, each NCA's header, its
-// sections and the files of its PFS0 sections.
+// `biwa info [-k <keys>] [--verify] <file>`: what is inside an NSP. With keys, each NCA's header,
+// its sections and the files of its PFS0 sections; with --verify, every section is read in full
+// and checked against its hashes.
 
 #include <format>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -23,7 +25,7 @@
 namespace biwa::cli {
 namespace {
 
-constexpr std::string_view kUsage = "[-k <prod.keys>] <file>";
+constexpr std::string_view kUsage = "[-k <prod.keys>] [--verify] <file>";
 
 // Keeps the first error seen, so the exit code reflects it after everything was printed.
 struct FirstError {
@@ -57,8 +59,14 @@ std::string SectionLine(const nx::NcaSection& section) {
     return line;
 }
 
+// Reads all of `data`; each read checks the hashes of what it read.
+Status ReadThrough(const nx::Storage& data) {
+    return nx::ForEachPiece(data, [](std::uint64_t, std::span<const std::byte>) -> Status { return {}; });
+}
+
 void DescribeNca(const nx::Pfs0& nsp, const nx::Pfs0Entry& entry, const nx::KeySet& keys,
-                 const std::map<std::string, nx::Ticket>& tickets, std::ostream& out, FirstError& first) {
+                 const std::map<std::string, nx::Ticket>& tickets, bool verify, std::ostream& out,
+                 FirstError& first) {
     auto fail = [&](const Error& error, std::string_view indent) {
         out << indent << "error: " << error << '\n';
         first.Note(error);
@@ -85,7 +93,8 @@ void DescribeNca(const nx::Pfs0& nsp, const nx::Pfs0Entry& entry, const nx::KeyS
     }
     for (const nx::NcaSection& section : header->sections) {
         out << "    " << SectionLine(section) << '\n';
-        if (section.fs_type != nx::NcaFsType::kPartitionFs) {
+        const bool list = section.fs_type == nx::NcaFsType::kPartitionFs;
+        if (!list && !verify) {
             continue;
         }
         if (!ctr_key && section.encryption != nx::NcaEncryption::kNone) {
@@ -102,12 +111,22 @@ void DescribeNca(const nx::Pfs0& nsp, const nx::Pfs0Entry& entry, const nx::KeyS
             fail(data.error(), "      ");
             continue;
         }
-        const Result<nx::Pfs0> pfs = nx::Pfs0::Open(*data);
-        if (!pfs) {
-            fail(pfs.error(), "      ");
-            continue;
+        if (list) {
+            const Result<nx::Pfs0> pfs = nx::Pfs0::Open(*data);
+            if (!pfs) {
+                fail(pfs.error(), "      ");
+                continue;
+            }
+            ListPfs0(*pfs, "      ", out);
         }
-        ListPfs0(*pfs, "      ", out);
+        if (verify) {
+            const Status read = ReadThrough(**data);
+            if (read) {
+                out << "      hashes match\n";
+            } else {
+                fail(read.error(), "      ");
+            }
+        }
     }
 }
 
@@ -116,8 +135,11 @@ void DescribeNca(const nx::Pfs0& nsp, const nx::Pfs0Entry& entry, const nx::KeyS
 int RunInfo(Args args, std::ostream& out, std::ostream& err) {
     std::optional<std::string_view> keys_path;
     std::optional<std::string_view> file;
+    bool verify = false;
     for (std::size_t i = 0; i < args.size(); ++i) {
-        if (args[i] == "-k" || args[i] == "--keys") {
+        if (args[i] == "--verify") {
+            verify = true;
+        } else if (args[i] == "-k" || args[i] == "--keys") {
             if (i + 1 >= args.size()) {
                 return UsageError("info", kUsage, "-k needs a key file", err);
             }
@@ -130,6 +152,9 @@ int RunInfo(Args args, std::ostream& out, std::ostream& err) {
     }
     if (!file) {
         return UsageError("info", kUsage, "a file is needed", err);
+    }
+    if (verify && !keys_path) {
+        return UsageError("info", kUsage, "--verify needs -k", err);
     }
 
     std::optional<nx::KeySet> keys;
@@ -179,7 +204,7 @@ int RunInfo(Args args, std::ostream& out, std::ostream& err) {
     }
     for (const nx::Pfs0Entry& entry : nsp->entries()) {
         if (entry.name.ends_with(".nca")) {
-            DescribeNca(*nsp, entry, *keys, tickets, out, first);
+            DescribeNca(*nsp, entry, *keys, tickets, verify, out, first);
         }
     }
     return first.code ? ExitCodeFor(*first.code) : kExitOk;

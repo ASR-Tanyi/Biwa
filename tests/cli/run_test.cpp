@@ -123,7 +123,7 @@ struct TestNsp {
     std::string keys;
 };
 
-void MakeTestNsp(TestNsp& t, bool with_ticket) {
+void MakeTestNsp(TestNsp& t, bool with_ticket, bool damaged = false) {
     constexpr std::array<std::uint8_t, 16> kRightsId = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05};
     const std::vector<std::byte> exefs_files =
@@ -137,8 +137,11 @@ void MakeTestNsp(TestNsp& t, bool with_ticket) {
     biwa::test::NcaBuildOptions options;
     options.rights_id = kRightsId;
     options.ctr_key = biwa::test::TestKey(5);  // the title key
-    std::vector<biwa::test::BuildFile> files = {
-        {"00112233445566778899aabbccddeeff.nca", biwa::test::BuildNca(options, {exefs})}};
+    std::vector<std::byte> nca = biwa::test::BuildNca(options, {exefs});
+    if (damaged) {
+        nca[biwa::nx::kNcaHeaderSize + hashed.payload_offset + 1] ^= std::byte{0x01};
+    }
+    std::vector<biwa::test::BuildFile> files = {{"00112233445566778899aabbccddeeff.nca", nca}};
     if (with_ticket) {
         files.push_back({"01000000000010000000000000000005.tik",
                          biwa::test::BuildTicket(kRightsId, biwa::test::TestKey(5), biwa::test::TestKey(9))});
@@ -176,6 +179,26 @@ TEST(CliInfoTest, MissingTicketIsReportedAndExitsWithMissingKeys) {
         << r.out;
     EXPECT_EQ(RunBiwa({"info", "-k"}).code, biwa::cli::kExitUsage);
     EXPECT_EQ(RunBiwa({"info", "-k", PathText(t.dir / "nope.keys"), t.nsp}).code, biwa::cli::kExitInput);
+}
+
+TEST(CliInfoTest, VerifyChecksEveryHash) {
+    TestNsp good;
+    MakeTestNsp(good, true);
+    Result r = RunBiwa({"info", "-k", good.keys, "--verify", good.nsp});
+    EXPECT_EQ(r.code, biwa::cli::kExitOk) << r.out << r.err;
+    EXPECT_NE(r.out.find("                   4  main.npdm\n      hashes match\n"), std::string::npos) << r.out;
+
+    TestNsp bad;
+    MakeTestNsp(bad, true, true);
+    r = RunBiwa({"info", "-k", bad.keys, "--verify", bad.nsp});
+    EXPECT_EQ(r.code, biwa::cli::kExitDamaged) << r.out;
+    const std::string error = "      error: corrupt: section 0 data: block 0 (bytes 0x0 to 0x68) does not match its hash\n";
+    EXPECT_NE(r.out.find(error), std::string::npos) << r.out;
+    EXPECT_EQ(r.out.find(error), r.out.rfind(error)) << "reported once\n" << r.out;
+
+    r = RunBiwa({"info", "--verify", good.nsp});
+    EXPECT_EQ(r.code, biwa::cli::kExitUsage);
+    EXPECT_NE(r.err.find("--verify needs -k"), std::string::npos) << r.err;
 }
 
 TEST(CliTest, ExitCodesCoverEveryErrorCategory) {
