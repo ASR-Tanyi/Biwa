@@ -5,6 +5,7 @@
 // folder (docs/design/03-extract.md, "The work folder").
 
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <filesystem>
 #include <format>
@@ -34,7 +35,7 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr std::string_view kUsage = "-k <prod.keys> -o <work> [--no-verify] <nsp>...";
+constexpr std::string_view kUsage = "-k <prod.keys> -o <work> [--no-verify] [-j N] <nsp>...";
 
 struct OpenedNca {
     std::string name;
@@ -287,6 +288,40 @@ class WorkFolder {
         return Write(relative, std::as_bytes(std::span(text)));
     }
 
+    // A large image: copied in pieces over several threads (hash-checked as it is read, unless
+    // checks are off), written under a temporary name and renamed when complete. Its manifest
+    // entry names the hash that covers it instead of a SHA-256 of the copy.
+    Status CopyImage(const std::string& relative, const nx::Storage& image, const Json& source,
+                     nx::CopyOptions options) {
+        const fs::path path = root_ / fs::path(relative);
+        fs::path part = path;
+        part += ".part";
+        std::error_code ec;
+        fs::create_directories(path.parent_path(), ec);
+        if (ec) {
+            return Failf(Errc::kIo, "cannot create {}: {}", PathText(path.parent_path()), ec.message());
+        }
+        const Status status = [&]() -> Status {  // the file is closed when this returns
+            Result<OutputFile> file = OutputFile::Create(part);
+            if (!file) {
+                return std::unexpected(file.error());
+            }
+            BIWA_RETURN_IF_ERROR(file->SetSize(image.Size()));
+            BIWA_RETURN_IF_ERROR(nx::CopyStorage(image, *file, 0, options));
+            return file->Close();
+        }();
+        if (!status) {
+            fs::remove(part, ec);
+            return std::unexpected(Error(status.error()).WithContext(relative));
+        }
+        fs::rename(part, path, ec);
+        if (ec) {
+            return Failf(Errc::kIo, "cannot rename {}: {}", PathText(part), ec.message());
+        }
+        outputs_.push_back({{"path", relative}, {"size", image.Size()}, {"source", source}});
+        return {};
+    }
+
     [[nodiscard]] const Json& outputs() const { return outputs_; }
 
    private:
@@ -341,8 +376,96 @@ Status WriteExefs(const OpenedNca& program, const nx::KeySet& keys, const nx::Ti
     return {};
 }
 
+// What a RomFS image was made from, for the manifest: the NCA and the master hash of the section
+// whose hash tree covers it.
+Json ImageSource(const OpenedNca& nca, const nx::NcaSection& section, nx::HashCheck check) {
+    const std::span<const std::byte> master = std::span(section.hash_data).subspan(0xC0, 0x20);
+    return Json{{"nca", nca.name},
+                {"section", section.index},
+                {"ivfc_master_hash",
+                 section.hash_type == nx::NcaHashType::kHierarchicalIntegrity
+                     ? Json(ToHex(std::span(reinterpret_cast<const std::uint8_t*>(master.data()), master.size())))
+                     : Json(nullptr)},
+                {"hashes_checked", check == nx::HashCheck::kOn}};
+}
+
+const nx::NcaSection* RomfsSection(const OpenedNca& nca) {
+    const auto section = std::ranges::find(nca.header.sections, nx::NcaFsType::kRomFs, &nx::NcaSection::fs_type);
+    return section == nca.header.sections.end() ? nullptr : &*section;
+}
+
+// romfs.bin: the base game's RomFS, with the update's patch laid over it when there is one.
+Status WriteRomfs(const Inputs& inputs, const OpenedNca& base_program, const nx::KeySet& keys,
+                  const nx::TicketMap& tickets, nx::HashCheck check, nx::CopyOptions options, WorkFolder& work,
+                  std::ostream& out) {
+    const nx::NcaSection* base_section = RomfsSection(base_program);
+    const OpenedNca* program = &base_program;
+    const nx::NcaSection* section = base_section;
+    Result<nx::StoragePtr> fs = Fail(Errc::kInternal, "no RomFS");
+    if (inputs.update) {
+        Result<const OpenedNca*> update_program = FindContent(*inputs.update, nx::ContentType::kProgram);
+        if (!update_program) {
+            return std::unexpected(update_program.error());
+        }
+        if (*update_program != nullptr && RomfsSection(**update_program) != nullptr) {
+            program = *update_program;
+            section = RomfsSection(*program);
+        }
+    }
+    if (section == nullptr) {
+        out << "  no RomFS\n";
+        return {};
+    }
+    if (section->HasPatch()) {
+        if (base_section == nullptr) {
+            return Fail(Errc::kCorrupt, "the update patches a RomFS the base game does not have");
+        }
+        fs = nx::OpenPatchedSectionFs(base_program.storage, base_program.header, program->storage, program->header,
+                                      *section, keys, tickets, check);
+    } else {
+        fs = nx::OpenSectionFs(program->storage, program->header, *section, keys, tickets, check);
+    }
+    if (!fs) {
+        return std::unexpected(std::move(fs).error().WithContext(program->name));
+    }
+    BIWA_RETURN_IF_ERROR(work.CopyImage("romfs.bin", **fs, ImageSource(*program, *section, check), options));
+    out << std::format("  romfs.bin {} bytes\n", (*fs)->Size());
+    return {};
+}
+
+// aoc/<index>.bin: each add-on content's RomFS.
+Status WriteAddOnContent(const Inputs& inputs, const nx::KeySet& keys, const nx::TicketMap& tickets,
+                         nx::HashCheck check, nx::CopyOptions options, WorkFolder& work, std::ostream& out) {
+    // Add-on content IDs count up from the application's ID + 0x1000.
+    const std::uint64_t first = inputs.base.cnmt.title_id + 0x1000;
+    for (const Package& dlc : inputs.dlc) {
+        const std::uint64_t index = dlc.cnmt.title_id - first;
+        if (dlc.cnmt.title_id < first || index >= 0x1000) {
+            return Failf(Errc::kInvalidArgument, "{}: add-on content ID {} is out of range",
+                         PathText(dlc.path.filename()), TitleText(dlc.cnmt.title_id));
+        }
+        Result<const OpenedNca*> data = FindContent(dlc, nx::ContentType::kData);
+        if (!data) {
+            return std::unexpected(data.error());
+        }
+        const nx::NcaSection* section = *data == nullptr ? nullptr : RomfsSection(**data);
+        if (section == nullptr) {
+            return Failf(Errc::kCorrupt, "{} has no data NCA with a RomFS", PathText(dlc.path.filename()));
+        }
+        Result<nx::StoragePtr> fs =
+            nx::OpenSectionFs((*data)->storage, (*data)->header, *section, keys, tickets, check);
+        if (!fs) {
+            return std::unexpected(std::move(fs).error().WithContext((*data)->name));
+        }
+        const std::string name = std::format("aoc/{}.bin", index);
+        BIWA_RETURN_IF_ERROR(work.CopyImage(name, **fs, ImageSource(**data, *section, check), options));
+        out << std::format("  {} {} bytes\n", name, (*fs)->Size());
+    }
+    return {};
+}
+
 Status Extract(const Inputs& inputs, const nx::KeySet& keys, const nx::TicketMap& tickets, nx::HashCheck check,
-               const fs::path& root, std::ostream& out) {
+               nx::CopyOptions options, const fs::path& root, std::ostream& out) {
     WorkFolder work(root);
     const Package& base = inputs.base;
     out << std::format("{} version {}", TitleText(base.cnmt.title_id), base.cnmt.version);
@@ -362,6 +485,16 @@ Status Extract(const Inputs& inputs, const nx::KeySet& keys, const nx::TicketMap
     }
     BIWA_RETURN_IF_ERROR(WriteExefs(**program, keys, tickets, check, work, out));
 
+    Result<const OpenedNca*> base_program = FindContent(base, nx::ContentType::kProgram);
+    if (!base_program) {
+        return std::unexpected(base_program.error());
+    }
+    if (*base_program == nullptr) {
+        return Failf(Errc::kCorrupt, "{} has no program NCA", PathText(base.path.filename()));
+    }
+    BIWA_RETURN_IF_ERROR(WriteRomfs(inputs, **base_program, keys, tickets, check, options, work, out));
+    BIWA_RETURN_IF_ERROR(WriteAddOnContent(inputs, keys, tickets, check, options, work, out));
+
     Json manifest{{"format", 1},
                   {"biwa", std::format("{} ({})", Version(), SourceCommit())},
                   {"title_id", TitleText(base.cnmt.title_id)},
@@ -369,6 +502,13 @@ Status Extract(const Inputs& inputs, const nx::KeySet& keys, const nx::TicketMap
     manifest["update"] = inputs.update ? Json{{"title_id", TitleText(inputs.update->cnmt.title_id)},
                                               {"version", inputs.update->cnmt.version}}
                                        : Json(nullptr);
+    Json dlc_list = Json::array();
+    for (const Package& dlc : inputs.dlc) {
+        dlc_list.push_back({{"title_id", TitleText(dlc.cnmt.title_id)},
+                            {"version", dlc.cnmt.version},
+                            {"index", dlc.cnmt.title_id - (base.cnmt.title_id + 0x1000)}});
+    }
+    manifest["dlc"] = std::move(dlc_list);
     Json input_list = Json::array({InputJson(base)});
     if (inputs.update) {
         input_list.push_back(InputJson(*inputs.update));
@@ -389,16 +529,25 @@ int RunExtract(Args args, std::ostream& out, std::ostream& err) {
     std::optional<std::string_view> keys_path;
     std::optional<std::string_view> work;
     nx::HashCheck check = nx::HashCheck::kOn;
+    nx::CopyOptions options;
     std::vector<std::string_view> files;
     for (std::size_t i = 0; i < args.size(); ++i) {
-        if (args[i] == "-k" || args[i] == "--keys" || args[i] == "-o") {
+        if (args[i] == "-k" || args[i] == "--keys" || args[i] == "-o" || args[i] == "-j") {
             if (i + 1 >= args.size()) {
                 return UsageError("extract", kUsage, std::format("{} needs a value", args[i]), err);
             }
+            const std::string_view value = args[i + 1];
             if (args[i] == "-o") {
-                work = args[i + 1];
+                work = value;
+            } else if (args[i] == "-j") {
+                unsigned threads = 0;
+                const auto [end, ec] = std::from_chars(value.data(), value.data() + value.size(), threads);
+                if (ec != std::errc() || end != value.data() + value.size() || threads == 0 || threads > 256) {
+                    return UsageError("extract", kUsage, "-j needs a number of threads from 1 to 256", err);
+                }
+                options.threads = threads;
             } else {
-                keys_path = args[i + 1];
+                keys_path = value;
             }
             ++i;
         } else if (args[i] == "--no-verify") {
@@ -428,7 +577,7 @@ int RunExtract(Args args, std::ostream& out, std::ostream& err) {
     if (!inputs) {
         return Report("extract", inputs.error(), err);
     }
-    const Status done = Extract(*inputs, *keys, tickets, check, fs::path(*work), out);
+    const Status done = Extract(*inputs, *keys, tickets, check, options, fs::path(*work), out);
     return done ? kExitOk : Report("extract", done.error(), err);
 }
 

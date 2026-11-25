@@ -26,6 +26,7 @@ struct TitleBuild {
     std::uint64_t related = 0x0100000000004800;
     std::uint8_t id_seed = 0x10;  // makes NCA IDs unique between packages
     std::vector<NcaBuildSection> program_sections;
+    std::vector<NcaBuildSection> data_sections;  // add-on content
 };
 
 inline NcaBuildOptions TitleNcaOptions(nx::NcaContentType type, std::uint64_t title_id) {
@@ -64,6 +65,18 @@ inline NcaBuildSection ExefsSection(std::uint8_t main_seed, std::uint64_t title_
                         {"rtld", BuildNso(rtld)}});
 }
 
+// A RomFS section (IVFC, AES-CTR) built from `hashed`.
+inline NcaBuildSection RomfsSection(const HashedSection& hashed, std::uint64_t counter_upper = 0x0000000100000000) {
+    NcaBuildSection section;
+    section.fs_type = nx::NcaFsType::kRomFs;
+    section.hash_type = nx::NcaHashType::kHierarchicalIntegrity;
+    section.encryption = nx::NcaEncryption::kAesCtr;
+    section.counter_upper = counter_upper;
+    section.hash_data = hashed.hash_data;
+    section.data = hashed.data;
+    return section;
+}
+
 inline std::vector<std::byte> BuildTitleNsp(const TitleBuild& title) {
     std::vector<BuildFile> files;
     std::vector<CnmtBuildContent> contents;
@@ -76,6 +89,16 @@ inline std::vector<std::byte> BuildTitleNsp(const TitleBuild& title) {
         program.size = nca.size();
         contents.push_back(program);
         files.push_back({ToHex(program.id) + ".nca", nca});
+    }
+    if (!title.data_sections.empty()) {
+        CnmtBuildContent data;
+        data.id[0] = static_cast<std::uint8_t>(title.id_seed + 2);
+        data.type = 2;
+        const std::vector<std::byte> nca =
+            BuildNca(TitleNcaOptions(nx::NcaContentType::kPublicData, title.title_id), title.data_sections);
+        data.size = nca.size();
+        contents.push_back(data);
+        files.push_back({ToHex(data.id) + ".nca", nca});
     }
     std::array<std::uint8_t, 0x10> meta_id{};
     meta_id[0] = static_cast<std::uint8_t>(title.id_seed + 1);

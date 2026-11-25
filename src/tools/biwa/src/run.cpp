@@ -28,7 +28,7 @@ int RunVersion(Args args, std::ostream& out, std::ostream& err);
 int RunHelp(Args args, std::ostream& out, std::ostream& err);
 
 constexpr std::array kCommands = {
-    Command{"extract", "-k <prod.keys> -o <work> [--no-verify] <nsp>...",
+    Command{"extract", "-k <prod.keys> -o <work> [--no-verify] [-j N] <nsp>...",
             "turn a game's NSPs (base game, update, add-on content) into a work folder", RunExtract},
     Command{"info", "[-k <prod.keys>] [--verify] <file>",
             "list what is inside an NSP; -k adds its NCAs, --verify checks their hashes", RunInfo},
