@@ -28,24 +28,24 @@ namespace biwa::cli {
 namespace {
 
 constexpr std::string_view kUsage =
-    "ls [-k <prod.keys>] [-r] <file> [path]\n"
-    "       biwa romfs cat [-k <prod.keys>] [-o <out>] <file> <path>";
+    "ls [-k <prod.keys>] [-u <update.nsp>] [-r] <file> [path]\n"
+    "       biwa romfs cat [-k <prod.keys>] [-u <update.nsp>] [-o <out>] <file> <path>";
 
-// The RomFS of the first program or public data NCA that has one.
-Result<nx::Romfs> OpenPackageRomfs(const nx::StoragePtr& storage, const nx::KeySet& keys, std::ostream& err) {
-    Result<nx::Pfs0> package = nx::Pfs0::Open(storage);
-    if (!package) {
-        return std::unexpected(std::move(package).error());
-    }
-    const nx::TicketMap tickets = nx::ReadTickets(*package, [&](std::string_view name, const Error& error) {
-        err << "biwa romfs: warning: " << name << ": " << error.message() << '\n';
-    });
+// The program (or public data) NCA of a package that has a RomFS, and that section.
+struct RomfsNca {
+    std::string name;
+    nx::StoragePtr storage;
+    nx::NcaHeader header;
+    nx::NcaSection section;
+};
+
+Result<RomfsNca> FindRomfsNca(const nx::Pfs0& package, const nx::KeySet& keys) {
     std::optional<Error> first_error;
-    for (const nx::Pfs0Entry& entry : package->entries()) {
+    for (const nx::Pfs0Entry& entry : package.entries()) {
         if (!entry.name.ends_with(".nca")) {
             continue;
         }
-        Result<nx::StoragePtr> nca = package->OpenEntry(entry);
+        Result<nx::StoragePtr> nca = package.OpenEntry(entry);
         Result<nx::NcaHeader> header =
             nca ? nx::ReadNcaHeader(**nca, keys) : Result<nx::NcaHeader>(std::unexpected(nca.error()));
         if (!header) {
@@ -59,14 +59,9 @@ Result<nx::Romfs> OpenPackageRomfs(const nx::StoragePtr& storage, const nx::KeyS
             continue;
         }
         const auto section = std::ranges::find(header->sections, nx::NcaFsType::kRomFs, &nx::NcaSection::fs_type);
-        if (section == header->sections.end()) {
-            continue;
+        if (section != header->sections.end()) {
+            return RomfsNca{entry.name, std::move(*nca), *header, *section};
         }
-        Result<nx::StoragePtr> fs = nx::OpenSectionFs(*nca, *header, *section, keys, tickets);
-        if (!fs) {
-            return std::unexpected(std::move(fs).error().WithContext(entry.name));
-        }
-        return nx::Romfs::Open(std::move(*fs));
     }
     if (first_error) {
         return std::unexpected(std::move(*first_error));
@@ -74,9 +69,67 @@ Result<nx::Romfs> OpenPackageRomfs(const nx::StoragePtr& storage, const nx::KeyS
     return Fail(Errc::kNotFound, "the package has no program or data NCA with a RomFS");
 }
 
+Result<nx::Pfs0> OpenPackage(const std::filesystem::path& path) {
+    Result<nx::StoragePtr> storage = nx::OpenFileStorage(path);
+    if (!storage) {
+        return std::unexpected(std::move(storage).error());
+    }
+    Result<nx::Pfs0> package = nx::Pfs0::Open(std::move(*storage));
+    if (!package) {
+        return std::unexpected(std::move(package).error().WithContext(PathText(path)));
+    }
+    return package;
+}
+
+// The RomFS of a package, with an update's patch laid over it if `update` is given.
+Result<nx::Romfs> OpenPackageRomfs(const nx::StoragePtr& storage, const std::optional<std::filesystem::path>& update,
+                                   const nx::KeySet& keys, std::ostream& err) {
+    Result<nx::Pfs0> base = nx::Pfs0::Open(storage);
+    if (!base) {
+        return std::unexpected(std::move(base).error());
+    }
+    auto warn = [&](std::string_view name, const Error& error) {
+        err << "biwa romfs: warning: " << name << ": " << error.message() << '\n';
+    };
+    nx::TicketMap tickets = nx::ReadTickets(*base, warn);
+    const Result<RomfsNca> base_nca = FindRomfsNca(*base, keys);
+    if (!base_nca) {
+        return std::unexpected(base_nca.error());
+    }
+    Result<nx::StoragePtr> fs = Fail(Errc::kInternal, "no RomFS opened");
+    if (update) {
+        const Result<nx::Pfs0> patch = OpenPackage(*update);
+        if (!patch) {
+            return std::unexpected(patch.error());
+        }
+        tickets.merge(nx::ReadTickets(*patch, warn));
+        Result<RomfsNca> patch_nca = FindRomfsNca(*patch, keys);
+        if (!patch_nca) {
+            return std::unexpected(std::move(patch_nca).error().WithContext(PathText(*update)));
+        }
+        fs = patch_nca->section.HasPatch()
+                 ? nx::OpenPatchedSectionFs(base_nca->storage, base_nca->header, patch_nca->storage, patch_nca->header,
+                                            patch_nca->section, keys, tickets)
+                 : nx::OpenSectionFs(patch_nca->storage, patch_nca->header, patch_nca->section, keys, tickets);
+        if (!fs) {
+            return std::unexpected(std::move(fs).error().WithContext(patch_nca->name));
+        }
+    } else {
+        if (base_nca->section.HasPatch()) {
+            return Fail(Errc::kInvalidArgument,
+                        "this is an update; give the base game's NSP, with the update as -u <update.nsp>");
+        }
+        fs = nx::OpenSectionFs(base_nca->storage, base_nca->header, base_nca->section, keys, tickets);
+        if (!fs) {
+            return std::unexpected(std::move(fs).error().WithContext(base_nca->name));
+        }
+    }
+    return nx::Romfs::Open(std::move(*fs));
+}
+
 // `file` is an NSP (keys needed) or a RomFS image.
-Result<nx::Romfs> OpenRomfs(const std::filesystem::path& path, const std::optional<nx::KeySet>& keys,
-                            std::ostream& err) {
+Result<nx::Romfs> OpenRomfs(const std::filesystem::path& path, const std::optional<std::filesystem::path>& update,
+                            const std::optional<nx::KeySet>& keys, std::ostream& err) {
     Result<nx::StoragePtr> storage = nx::OpenFileStorage(path);
     if (!storage) {
         return std::unexpected(std::move(storage).error());
@@ -89,12 +142,15 @@ Result<nx::Romfs> OpenRomfs(const std::filesystem::path& path, const std::option
         if (!keys) {
             return Fail(Errc::kMissingKey, "an NSP needs -k <prod.keys>");
         }
-        return OpenPackageRomfs(*storage, *keys, err);
+        return OpenPackageRomfs(*storage, update, *keys, err);
     }
     std::uint64_t header_size = 0;
     std::memcpy(&header_size, magic.data(), sizeof(header_size));
     if (header_size != 0x50) {
         return Failf(Errc::kInvalidArgument, "{} is neither an NSP nor a RomFS image", PathText(path));
+    }
+    if (update) {
+        return Fail(Errc::kInvalidArgument, "-u needs the base game's NSP, not a RomFS image");
     }
     return nx::Romfs::Open(std::move(*storage));
 }
@@ -184,18 +240,23 @@ int RunRomfs(Args args, std::ostream& out, std::ostream& err) {
     }
     const bool ls = args[0] == "ls";
     std::optional<std::string_view> keys_path;
+    std::optional<std::string_view> update;
     std::optional<std::string_view> output;
     bool recursive = false;
     std::vector<std::string_view> positional;
     for (std::size_t i = 1; i < args.size(); ++i) {
-        if (args[i] == "-k" || args[i] == "--keys" || (!ls && args[i] == "-o")) {
+        if (args[i] == "-k" || args[i] == "--keys" || args[i] == "-u" || args[i] == "--update" ||
+            (!ls && args[i] == "-o")) {
             if (i + 1 >= args.size()) {
                 return UsageError("romfs", kUsage, std::format("{} needs a file", args[i]), err);
             }
-            if (args[i] == "-o") {
-                output = args[++i];
+            const std::string_view option = args[i++];
+            if (option == "-o") {
+                output = args[i];
+            } else if (option == "-u" || option == "--update") {
+                update = args[i];
             } else {
-                keys_path = args[++i];
+                keys_path = args[i];
             }
         } else if (ls && args[i] == "-r") {
             recursive = true;
@@ -217,7 +278,9 @@ int RunRomfs(Args args, std::ostream& out, std::ostream& err) {
         keys = std::move(*loaded);
     }
     const std::filesystem::path file(positional[0]);
-    const Result<nx::Romfs> romfs = OpenRomfs(file, keys, err);
+    const std::optional<std::filesystem::path> update_path =
+        update ? std::optional<std::filesystem::path>(*update) : std::nullopt;
+    const Result<nx::Romfs> romfs = OpenRomfs(file, update_path, keys, err);
     if (!romfs) {
         return Report("romfs", romfs.error(), err);
     }

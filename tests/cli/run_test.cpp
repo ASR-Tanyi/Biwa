@@ -14,6 +14,7 @@
 #include "biwa/core/hex.h"
 #include "biwa/core/version.h"
 #include "support/nca_builder.h"
+#include "support/patch_builder.h"
 #include "support/pfs0_builder.h"
 #include "support/romfs_builder.h"
 #include "support/temp_dir.h"
@@ -315,6 +316,62 @@ TEST(CliRomfsTest, ReadsTheRomfsOfAnNsp) {
         RunBiwa({"romfs", "cat", "-k", PathText(dir / "prod.keys"), PathText(dir / "game.nsp"), "System/Version.txt"});
     EXPECT_EQ(r.code, biwa::cli::kExitOk) << r.err;
     EXPECT_EQ(r.out, "1.0.0\n");
+}
+
+// A base game NSP and an update NSP whose patch changes a.txt; neither uses tickets.
+struct UpdatePair {
+    biwa::test::TempDir dir;
+    std::string base;
+    std::string update;
+    std::string keys;
+    UpdatePair() {
+        const auto old_image = biwa::test::BuildRomfs({{"a.txt", biwa::test::Bytes("old text")}});
+        const auto new_image = biwa::test::BuildRomfs({{"a.txt", biwa::test::Bytes("new text")}});
+        const biwa::test::HashedSection old_hashed = biwa::test::BuildIvfcSection(old_image);
+        const biwa::test::HashedSection new_hashed = biwa::test::BuildIvfcSection(new_image);
+        biwa::test::NcaBuildSection romfs;
+        romfs.fs_type = biwa::nx::NcaFsType::kRomFs;
+        romfs.hash_type = biwa::nx::NcaHashType::kHierarchicalIntegrity;
+        romfs.encryption = biwa::nx::NcaEncryption::kAesCtr;
+        romfs.hash_data = old_hashed.hash_data;
+        romfs.data = old_hashed.data;
+        biwa::test::NcaBuildOptions options;
+        options.key_area_key = biwa::test::TestKey(1);
+        options.key_area[2] = biwa::test::TestKey(4);
+        const auto base_nca = biwa::test::BuildNca(options, {romfs});
+
+        const biwa::test::PatchSection patch = biwa::test::BuildPatchSection(
+            old_hashed.data, new_hashed.data, biwa::test::TestKey(4), 0, biwa::nx::kNcaHeaderSize);
+        romfs.encryption = biwa::nx::NcaEncryption::kAesCtrEx;
+        romfs.hash_data = new_hashed.hash_data;
+        romfs.patch_info = patch.patch_info;
+        romfs.data = patch.data;
+        const auto update_nca = biwa::test::BuildNca(options, {romfs});
+
+        EXPECT_TRUE(biwa::WriteFileAtomic(dir / "base.nsp", biwa::test::BuildPfs0({{"b.nca", base_nca}})));
+        EXPECT_TRUE(biwa::WriteFileAtomic(dir / "update.nsp", biwa::test::BuildPfs0({{"u.nca", update_nca}})));
+        const std::string text = biwa::test::TestKeysText(biwa::test::TestKey(1), 0);
+        EXPECT_TRUE(biwa::WriteFileAtomic(dir / "prod.keys", std::as_bytes(std::span(text))));
+        base = PathText(dir / "base.nsp");
+        update = PathText(dir / "update.nsp");
+        keys = PathText(dir / "prod.keys");
+    }
+};
+
+TEST(CliRomfsTest, AppliesAnUpdate) {
+    const UpdatePair t;
+    Result r = RunBiwa({"romfs", "cat", "-k", t.keys, t.base, "a.txt"});
+    EXPECT_EQ(r.code, biwa::cli::kExitOk) << r.err;
+    EXPECT_EQ(r.out, "old text");
+    r = RunBiwa({"romfs", "cat", "-k", t.keys, "-u", t.update, t.base, "a.txt"});
+    EXPECT_EQ(r.code, biwa::cli::kExitOk) << r.err;
+    EXPECT_EQ(r.out, "new text");
+
+    r = RunBiwa({"romfs", "ls", "-k", t.keys, t.update});
+    EXPECT_EQ(r.code, biwa::cli::kExitInput);
+    EXPECT_NE(r.err.find("this is an update; give the base game's NSP, with the update as -u <update.nsp>"),
+              std::string::npos)
+        << r.err;
 }
 
 TEST(CliTest, ExitCodesCoverEveryErrorCategory) {

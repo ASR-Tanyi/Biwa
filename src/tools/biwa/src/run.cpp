@@ -30,8 +30,8 @@ int RunHelp(Args args, std::ostream& out, std::ostream& err);
 constexpr std::array kCommands = {
     Command{"info", "[-k <prod.keys>] [--verify] <file>",
             "list what is inside an NSP; -k adds its NCAs, --verify checks their hashes", RunInfo},
-    Command{"romfs", "ls|cat [-k <prod.keys>] <file> [path]", "list or print RomFS files, from an NSP or a RomFS image",
-            RunRomfs},
+    Command{"romfs", "ls|cat [-k <prod.keys>] [-u <update.nsp>] <file> [path]",
+            "list or print RomFS files, from an NSP or a RomFS image", RunRomfs},
     Command{"version", "", "print Biwa's version", RunVersion},
     Command{"help", "", "print this text", RunHelp},
 };

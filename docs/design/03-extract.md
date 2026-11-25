@@ -74,11 +74,11 @@ Later tools add `lift/`, `gen/`, `build/`, `coverage/`, `nro/`, `shaders/`, `sav
 biwa info [-k prod.keys] [--verify] <file.nsp>
 biwa extract -k prod.keys [-t title.keys] -o <work> <base.nsp> [<update.nsp>] [<dlc.nsp> ...]
              [--no-verify] [-j N]
-biwa romfs ls  [-k prod.keys] [-r] <file> [path]
-biwa romfs cat [-k prod.keys] [-o out] <file> <path>
+biwa romfs ls  [-k prod.keys] [-u update.nsp] [-r] <file> [path]
+biwa romfs cat [-k prod.keys] [-u update.nsp] [-o out] <file> <path>
 ```
 
-`romfs` reads a work folder, a RomFS image, or an NSP directly (its program or add-on data NCA, with `-k`).
+`romfs` reads a work folder, a RomFS image, or an NSP directly (its program or add-on data NCA, with `-k`); `-u` lays an update's patch over the base game's RomFS.
 
 | Exit code | Meaning |
 |---|---|

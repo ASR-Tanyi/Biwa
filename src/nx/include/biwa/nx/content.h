@@ -31,4 +31,12 @@ TicketMap ReadTickets(const Pfs0& package, const TicketErrorFn& on_error);
 Result<StoragePtr> OpenSectionFs(const StoragePtr& nca, const NcaHeader& header, const NcaSection& section,
                                  const KeySet& keys, const TicketMap& tickets, HashCheck check = HashCheck::kOn);
 
+// The file system of an update's patch section laid over the base game: `patch_section` of
+// `patch_nca`, over the section with the same index in `base_nca`. Keys come from `tickets` (which
+// may hold both packages' tickets) or the key areas, as for OpenSectionFs.
+Result<StoragePtr> OpenPatchedSectionFs(const StoragePtr& base_nca, const NcaHeader& base_header,
+                                        const StoragePtr& patch_nca, const NcaHeader& patch_header,
+                                        const NcaSection& patch_section, const KeySet& keys, const TicketMap& tickets,
+                                        HashCheck check = HashCheck::kOn);
+
 }  // namespace biwa::nx
