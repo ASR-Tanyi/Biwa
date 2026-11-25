@@ -25,5 +25,6 @@ int Report(std::string_view command, const Error& error, std::ostream& err);
 int UsageError(std::string_view command, std::string_view usage, std::string_view problem, std::ostream& err);
 
 int RunInfo(Args args, std::ostream& out, std::ostream& err);
+int RunRomfs(Args args, std::ostream& out, std::ostream& err);
 
 }  // namespace biwa::cli

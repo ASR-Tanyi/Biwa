@@ -61,7 +61,7 @@ One per title:
 
 Later tools add `lift/`, `gen/`, `build/`, `coverage/`, `nro/`, `shaders/`, `save/` and `logs/`. Their formats are in the documents for those tools.
 
-`romfs.bin` is the RomFS exactly as the game sees it, so the runtime's file system service reads it with the same RomFS parser the tests use, and directory order and file offsets match the console. `biwa romfs ls <work> [path]` and `biwa romfs cat <work> <path>` let a person look inside without extracting a second copy.
+`romfs.bin` is the RomFS exactly as the game sees it, so the runtime's file system service reads it with the same RomFS parser the tests use, and directory order and file offsets match the console. `biwa romfs ls` and `biwa romfs cat` let a person look inside without extracting a second copy.
 
 ## NSO and NPDM
 
@@ -71,12 +71,14 @@ Later tools add `lift/`, `gen/`, `build/`, `coverage/`, `nro/`, `shaders/`, `sav
 ## Command
 
 ```
-biwa info <file.nsp | file.nca>
+biwa info [-k prod.keys] [--verify] <file.nsp>
 biwa extract -k prod.keys [-t title.keys] -o <work> <base.nsp> [<update.nsp>] [<dlc.nsp> ...]
              [--no-verify] [-j N]
-biwa romfs ls  <work> [path]
-biwa romfs cat <work> <path>
+biwa romfs ls  [-k prod.keys] [-r] <file> [path]
+biwa romfs cat [-k prod.keys] [-o out] <file> <path>
 ```
+
+`romfs` reads a work folder, a RomFS image, or an NSP directly (its program or add-on data NCA, with `-k`).
 
 | Exit code | Meaning |
 |---|---|

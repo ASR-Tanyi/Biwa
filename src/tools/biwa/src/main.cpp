@@ -9,7 +9,15 @@
 
 #include "biwa/cli/run.h"
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    _setmode(_fileno(stdout), _O_BINARY);  // `biwa romfs cat` writes file bytes as they are
+#endif
     try {
         const std::span<char*> raw(argv, static_cast<std::size_t>(argc));
         std::vector<std::string_view> args;

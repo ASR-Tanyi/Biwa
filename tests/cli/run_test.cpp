@@ -15,6 +15,7 @@
 #include "biwa/core/version.h"
 #include "support/nca_builder.h"
 #include "support/pfs0_builder.h"
+#include "support/romfs_builder.h"
 #include "support/temp_dir.h"
 
 namespace {
@@ -199,6 +200,120 @@ TEST(CliInfoTest, VerifyChecksEveryHash) {
     r = RunBiwa({"info", "--verify", good.nsp});
     EXPECT_EQ(r.code, biwa::cli::kExitUsage);
     EXPECT_NE(r.err.find("--verify needs -k"), std::string::npos) << r.err;
+}
+
+std::vector<std::byte> SampleRomfs() {
+    return biwa::test::BuildRomfs({
+        {"Pack/Bootup.pack", biwa::test::Bytes("SARC bootup")},
+        {"System/Version.txt", biwa::test::Bytes("1.0.0\n")},
+        {"top.bin", biwa::test::Bytes("top")},
+    });
+}
+
+struct RomfsImage {
+    biwa::test::TempDir dir;
+    std::string path;
+    RomfsImage() : path(PathText(dir / "romfs.bin")) {
+        EXPECT_TRUE(biwa::WriteFileAtomic(dir / "romfs.bin", SampleRomfs()).has_value());
+    }
+};
+
+TEST(CliRomfsTest, LsListsADirectory) {
+    const RomfsImage t;
+    Result r = RunBiwa({"romfs", "ls", t.path});
+    EXPECT_EQ(r.code, biwa::cli::kExitOk) << r.err;
+    EXPECT_EQ(r.out,
+              "                Pack/\n"
+              "                System/\n"
+              "             3  top.bin\n");
+    r = RunBiwa({"romfs", "ls", t.path, "/System"});
+    EXPECT_EQ(r.out, "             6  Version.txt\n");
+}
+
+TEST(CliRomfsTest, LsRecursiveListsFullPaths) {
+    const RomfsImage t;
+    Result r = RunBiwa({"romfs", "ls", "-r", t.path});
+    EXPECT_EQ(r.code, biwa::cli::kExitOk) << r.err;
+    EXPECT_EQ(r.out,
+              "             3  /top.bin\n"
+              "            11  /Pack/Bootup.pack\n"
+              "             6  /System/Version.txt\n"
+              "            20  bytes in 3 files\n");
+    r = RunBiwa({"romfs", "ls", t.path, "Pack/", "-r"});
+    EXPECT_EQ(r.out,
+              "            11  /Pack/Bootup.pack\n"
+              "            11  bytes in 1 file\n");
+}
+
+TEST(CliRomfsTest, CatPrintsOrWritesAFile) {
+    const RomfsImage t;
+    Result r = RunBiwa({"romfs", "cat", t.path, "System/Version.txt"});
+    EXPECT_EQ(r.code, biwa::cli::kExitOk) << r.err;
+    EXPECT_EQ(r.out, "1.0.0\n");
+    const std::string copy = PathText(t.dir / "bootup.pack");
+    r = RunBiwa({"romfs", "cat", "-o", copy, t.path, "/Pack/Bootup.pack"});
+    EXPECT_EQ(r.code, biwa::cli::kExitOk) << r.err;
+    EXPECT_TRUE(r.out.empty());
+    EXPECT_EQ(biwa::ReadFileText(t.dir / "bootup.pack").value_or(""), "SARC bootup");
+}
+
+TEST(CliRomfsTest, ProblemsHaveExitCodes) {
+    const RomfsImage t;
+    EXPECT_EQ(RunBiwa({"romfs"}).code, biwa::cli::kExitUsage);
+    EXPECT_EQ(RunBiwa({"romfs", "rm", t.path}).code, biwa::cli::kExitUsage);
+    EXPECT_EQ(RunBiwa({"romfs", "cat", t.path}).code, biwa::cli::kExitUsage);
+    EXPECT_EQ(RunBiwa({"romfs", "ls", t.path, "a", "b"}).code, biwa::cli::kExitUsage);
+    EXPECT_EQ(RunBiwa({"romfs", "ls", "-k"}).code, biwa::cli::kExitUsage);
+
+    Result r = RunBiwa({"romfs", "cat", t.path, "Pack/Missing.pack"});
+    EXPECT_EQ(r.code, biwa::cli::kExitInput);
+    EXPECT_EQ(r.err, "biwa romfs: the RomFS has no Pack/Missing.pack\n");
+    EXPECT_EQ(RunBiwa({"romfs", "ls", t.path, "top.bin"}).code, biwa::cli::kExitInput);
+
+    ASSERT_TRUE(biwa::WriteFileAtomic(t.dir / "other.bin", biwa::test::Bytes("something else")).has_value());
+    r = RunBiwa({"romfs", "ls", PathText(t.dir / "other.bin")});
+    EXPECT_EQ(r.code, biwa::cli::kExitInput);
+    EXPECT_NE(r.err.find("is neither an NSP nor a RomFS image"), std::string::npos) << r.err;
+
+    ASSERT_TRUE(biwa::WriteFileAtomic(t.dir / "empty.nsp", biwa::test::BuildPfs0({})).has_value());
+    r = RunBiwa({"romfs", "ls", PathText(t.dir / "empty.nsp")});
+    EXPECT_EQ(r.code, biwa::cli::kExitMissingKeys);
+    EXPECT_NE(r.err.find("an NSP needs -k <prod.keys>"), std::string::npos) << r.err;
+}
+
+TEST(CliRomfsTest, ReadsTheRomfsOfAnNsp) {
+    constexpr std::array<std::uint8_t, 16> kRightsId = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00,
+                                                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07};
+    const biwa::test::HashedSection hashed = biwa::test::BuildIvfcSection(SampleRomfs());
+    biwa::test::NcaBuildSection romfs;
+    romfs.fs_type = biwa::nx::NcaFsType::kRomFs;
+    romfs.hash_type = biwa::nx::NcaHashType::kHierarchicalIntegrity;
+    romfs.encryption = biwa::nx::NcaEncryption::kAesCtr;
+    romfs.counter_upper = 0x0000000100000000;
+    romfs.hash_data = hashed.hash_data;
+    romfs.data = hashed.data;
+    biwa::test::NcaBuildOptions options;
+    options.rights_id = kRightsId;
+    options.ctr_key = biwa::test::TestKey(6);
+    biwa::test::NcaBuildOptions control;
+    control.content_type = biwa::nx::NcaContentType::kControl;  // skipped: not program data
+
+    const biwa::test::TempDir dir;
+    const std::vector<biwa::test::BuildFile> files = {
+        {"aa.nca", biwa::test::BuildNca(control, {romfs})},
+        {"bb.nca", biwa::test::BuildNca(options, {romfs})},
+        {"01000000000030000000000000000007.tik",
+         biwa::test::BuildTicket(kRightsId, biwa::test::TestKey(6), biwa::test::TestKey(9))},
+    };
+    ASSERT_TRUE(biwa::WriteFileAtomic(dir / "game.nsp", biwa::test::BuildPfs0(files)).has_value());
+    const std::string keys = biwa::test::TestKeysText(biwa::test::TestKey(1), 0) +
+                             "titlekek_00 = " + biwa::ToHex(biwa::test::TestKey(9)) + "\n";
+    ASSERT_TRUE(biwa::WriteFileAtomic(dir / "prod.keys", std::as_bytes(std::span(keys))).has_value());
+
+    const Result r =
+        RunBiwa({"romfs", "cat", "-k", PathText(dir / "prod.keys"), PathText(dir / "game.nsp"), "System/Version.txt"});
+    EXPECT_EQ(r.code, biwa::cli::kExitOk) << r.err;
+    EXPECT_EQ(r.out, "1.0.0\n");
 }
 
 TEST(CliTest, ExitCodesCoverEveryErrorCategory) {
