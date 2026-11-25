@@ -4,7 +4,7 @@
 # The command line lives in a library so tests can run it without starting a process.
 biwa_add_module(cli LAYER 5
     SOURCES src/run.cpp
-    DEPS core)
+    DEPS core nx)
 
 add_executable(biwa src/main.cpp)
 target_link_libraries(biwa PRIVATE biwa::cli)
