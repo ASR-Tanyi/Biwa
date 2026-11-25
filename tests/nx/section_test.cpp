@@ -42,9 +42,9 @@ biwa::nx::StoragePtr ExefsNca() {
     exefs.hash_type = NcaHashType::kHierarchicalSha256;
     exefs.encryption = NcaEncryption::kAesCtr;
     exefs.counter_upper = 0x0000000300000000;
-    exefs.hash_data = biwa::test::Sha256HashData(0x200, pfs0.size());
-    exefs.data.resize(0x200);
-    exefs.data.insert(exefs.data.end(), pfs0.begin(), pfs0.end());
+    const biwa::test::HashedSection hashed = biwa::test::BuildSha256Section(pfs0, 0x40);
+    exefs.hash_data = hashed.hash_data;
+    exefs.data = hashed.data;
     biwa::test::NcaBuildOptions options;
     options.key_area_key = biwa::test::TestKey(1);
     options.key_area[2] = biwa::test::TestKey(7);
@@ -108,6 +108,86 @@ TEST(SectionTest, FindsIvfcDataLevel) {
     biwa::test::PutU64(hash, 0x10 + 5 * 0x18 + 8, 0x200000);  // past the section
     std::ranges::copy(hash, section.hash_data.begin());
     EXPECT_EQ(biwa::nx::FindSectionData(section).error().code(), Errc::kCorrupt);
+}
+
+// A program NCA with one AES-CTR section built from `hashed`.
+std::vector<std::byte> NcaWith(const biwa::test::HashedSection& hashed, NcaFsType fs_type, NcaHashType hash_type) {
+    biwa::test::NcaBuildSection section;
+    section.fs_type = fs_type;
+    section.hash_type = hash_type;
+    section.encryption = NcaEncryption::kAesCtr;
+    section.counter_upper = 0x0000000500000000;
+    section.hash_data = hashed.hash_data;
+    section.data = hashed.data;
+    biwa::test::NcaBuildOptions options;
+    options.key_area_key = biwa::test::TestKey(1);
+    options.key_area[2] = biwa::test::TestKey(7);
+    return biwa::test::BuildNca(options, {section});
+}
+
+biwa::Result<biwa::nx::StoragePtr> OpenData(const std::vector<std::byte>& bytes,
+                                            biwa::nx::HashCheck check = biwa::nx::HashCheck::kOn) {
+    const biwa::nx::StoragePtr nca = biwa::nx::MakeMemoryStorage(bytes);
+    const auto header = biwa::nx::ReadNcaHeader(*nca, Keys());
+    EXPECT_TRUE(header.has_value()) << header.error();
+    const auto section = biwa::nx::OpenNcaSection(nca, header->sections[0], biwa::test::TestKey(7));
+    EXPECT_TRUE(section.has_value()) << section.error();
+    return biwa::nx::OpenSectionData(*section, header->sections[0], check);
+}
+
+TEST(SectionTest, ChecksIvfcSections) {
+    std::vector<std::byte> payload(0x1500);
+    for (std::size_t i = 0; i < payload.size(); ++i) {
+        payload[i] = static_cast<std::byte>(i * 29 + 3);
+    }
+    const biwa::test::HashedSection hashed = biwa::test::BuildIvfcSection(payload);
+    const std::vector<std::byte> good = NcaWith(hashed, NcaFsType::kRomFs, NcaHashType::kHierarchicalIntegrity);
+    const auto data = OpenData(good);
+    ASSERT_TRUE(data.has_value()) << data.error();
+    std::vector<std::byte> all(payload.size());
+    ASSERT_TRUE((*data)->Read(0, all).has_value());
+    EXPECT_EQ(all, payload);
+
+    // Damage in the data level fails reads of that block only (AES-CTR flips the same plaintext bit).
+    std::vector<std::byte> damaged = good;
+    damaged[biwa::nx::kNcaHeaderSize + hashed.payload_offset + 0x345] ^= std::byte{0x80};
+    const auto opened = OpenData(damaged);
+    ASSERT_TRUE(opened.has_value()) << opened.error();
+    std::vector<std::byte> block(0x200);
+    EXPECT_TRUE((*opened)->Read(0, block).has_value());
+    const auto status = (*opened)->Read(0, all);
+    ASSERT_FALSE(status.has_value());
+    EXPECT_EQ(status.error().code(), Errc::kCorrupt);
+    EXPECT_NE(status.error().message().find("section 0 data: block 1"), std::string::npos) << status.error();
+    EXPECT_TRUE((*OpenData(damaged, biwa::nx::HashCheck::kOff))->Read(0, all).has_value());
+
+    // Damage in level 0 fails against the master hash when the section is opened.
+    damaged = good;
+    damaged[biwa::nx::kNcaHeaderSize + 3] ^= std::byte{0x01};
+    const auto top = OpenData(damaged);
+    ASSERT_FALSE(top.has_value());
+    EXPECT_EQ(top.error().code(), Errc::kCorrupt);
+    EXPECT_NE(top.error().message().find("section 0 hash level 0"), std::string::npos) << top.error();
+}
+
+TEST(SectionTest, ChecksSha256Sections) {
+    const std::vector<std::byte> pfs0 = biwa::test::BuildPfs0({{"main", Bytes("some code")}});
+    const biwa::test::HashedSection hashed = biwa::test::BuildSha256Section(pfs0, 0x20);
+    const std::vector<std::byte> good = NcaWith(hashed, NcaFsType::kPartitionFs, NcaHashType::kHierarchicalSha256);
+    ASSERT_TRUE(OpenData(good).has_value());
+
+    std::vector<std::byte> damaged = good;
+    damaged[biwa::nx::kNcaHeaderSize + hashed.payload_offset + 0x21] ^= std::byte{0x01};
+    const auto data = OpenData(damaged);
+    ASSERT_TRUE(data.has_value()) << data.error();
+    std::vector<std::byte> out(0x10);
+    EXPECT_TRUE((*data)->Read(0, out).has_value());
+    EXPECT_EQ((*data)->Read(0x20, out).error().code(), Errc::kCorrupt);
+
+    damaged = good;
+    damaged[biwa::nx::kNcaHeaderSize + 1] ^= std::byte{0x01};  // the hash table
+    EXPECT_EQ(OpenData(damaged).error().code(), Errc::kCorrupt);
+    EXPECT_TRUE(OpenData(damaged, biwa::nx::HashCheck::kOff).has_value());
 }
 
 TEST(SectionTest, UnsupportedLayersSaySo) {

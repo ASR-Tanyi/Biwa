@@ -6,8 +6,11 @@
 #include <algorithm>
 #include <cstring>
 #include <format>
+#include <string>
 #include <utility>
 #include <vector>
+
+#include "biwa/nx/hash.h"
 
 namespace biwa::nx {
 namespace {
@@ -55,6 +58,106 @@ T Field(const std::array<std::byte, 0xF8>& data, std::size_t offset) {
     T value{};
     std::memcpy(&value, data.data() + offset, sizeof(T));
     return value;
+}
+
+// A section's hash tree: level 0 is checked against the master hash, each level after it against
+// the level before, and the last level is the file system.
+struct HashLevel {
+    std::uint64_t offset = 0;
+    std::uint64_t size = 0;
+    std::uint64_t block_size = 0;
+};
+struct HashTree {
+    std::vector<std::byte> master;
+    std::vector<HashLevel> levels;
+    HashPadding padding = HashPadding::kNone;
+};
+
+Result<HashTree> ReadHashTree(const NcaSection& section) {
+    HashTree tree;
+    const auto& data = section.hash_data;
+    switch (section.hash_type) {
+        case NcaHashType::kHierarchicalSha256: {
+            // master hash (0x20), block size (u32), layer count (u32), regions [5] x {offset, size}.
+            // The master hash covers all of region 0 at once.
+            const auto block_size = Field<std::uint32_t>(data, 0x20);
+            const auto layers = Field<std::uint32_t>(data, 0x24);
+            if (layers < 1 || layers > 5) {
+                return Failf(Errc::kCorrupt, "section {}: {} hash layers", section.index, layers);
+            }
+            tree.master.assign(data.begin(), data.begin() + 0x20);
+            for (std::uint32_t i = 0; i < layers; ++i) {
+                const HashLevel level{Field<std::uint64_t>(data, 0x28 + i * 0x10),
+                                      Field<std::uint64_t>(data, 0x30 + i * 0x10), block_size};
+                tree.levels.push_back(level);
+            }
+            tree.levels[0].block_size = tree.levels[0].size;
+            tree.padding = HashPadding::kNone;
+            return tree;
+        }
+        case NcaHashType::kHierarchicalIntegrity: {
+            // "IVFC", version, master hash size (u32), max layers (u32),
+            // levels [6] x {offset, size, block order (u32), reserved}, salt (0x20), master hash (0x20)
+            if (Field<std::uint32_t>(data, 0) != 0x43465649) {  // "IVFC"
+                return Failf(Errc::kCorrupt, "section {}: bad IVFC magic", section.index);
+            }
+            if (Field<std::uint32_t>(data, 0x08) != 0x20) {
+                return Failf(Errc::kCorrupt, "section {}: IVFC master hash size is {:#x}", section.index,
+                             Field<std::uint32_t>(data, 0x08));
+            }
+            const auto max_layers = Field<std::uint32_t>(data, 0x0C);
+            if (max_layers < 2 || max_layers > 7) {
+                return Failf(Errc::kCorrupt, "section {}: {} IVFC layers", section.index, max_layers);
+            }
+            tree.master.assign(data.begin() + 0xC0, data.begin() + 0xE0);
+            for (std::uint32_t i = 0; i + 1 < max_layers; ++i) {
+                const std::size_t at = 0x10 + std::size_t{i} * 0x18;
+                const auto order = Field<std::uint32_t>(data, at + 0x10);
+                if (order >= 32) {
+                    return Failf(Errc::kCorrupt, "section {}: IVFC level {} block order {}", section.index, i, order);
+                }
+                tree.levels.push_back(
+                    {Field<std::uint64_t>(data, at), Field<std::uint64_t>(data, at + 8), std::uint64_t{1} << order});
+            }
+            tree.padding = HashPadding::kZeros;
+            return tree;
+        }
+        default:
+            return Failf(Errc::kUnsupported, "section {} uses {} hashing, which is not supported yet", section.index,
+                         HashTypeName(section.hash_type));
+    }
+}
+
+Result<StoragePtr> OpenCheckedData(const StoragePtr& section_storage, const NcaSection& section) {
+    Result<HashTree> tree = ReadHashTree(section);
+    if (!tree) {
+        return std::unexpected(std::move(tree).error());
+    }
+    StoragePtr hashes = MakeMemoryStorage(std::move(tree->master));
+    for (std::size_t i = 0; i < tree->levels.size(); ++i) {
+        const HashLevel& level = tree->levels[i];
+        const bool last = i + 1 == tree->levels.size();
+        std::string what = last ? std::format("section {} data", section.index)
+                                : std::format("section {} hash level {}", section.index, i);
+        Result<StoragePtr> raw = MakeSubStorage(section_storage, level.offset, level.size, what);
+        if (!raw) {
+            return raw;
+        }
+        Result<StoragePtr> checked =
+            MakeHashCheckedStorage(hashes, std::move(*raw), level.block_size, tree->padding, std::move(what));
+        if (!checked) {
+            return checked;
+        }
+        if (i == 0) {
+            // The top level is small (one block per master hash); keep it, checked, in memory.
+            std::vector<std::byte> top(static_cast<std::size_t>(level.size));
+            BIWA_RETURN_IF_ERROR((*checked)->Read(0, top));
+            hashes = MakeMemoryStorage(std::move(top));
+        } else {
+            hashes = std::move(*checked);
+        }
+    }
+    return hashes;
 }
 
 }  // namespace
@@ -135,7 +238,10 @@ Result<SectionDataRegion> FindSectionData(const NcaSection& section) {
     return region;
 }
 
-Result<StoragePtr> OpenSectionData(StoragePtr section_storage, const NcaSection& section) {
+Result<StoragePtr> OpenSectionData(StoragePtr section_storage, const NcaSection& section, HashCheck check) {
+    if (check == HashCheck::kOn && section.hash_type != NcaHashType::kNone) {
+        return OpenCheckedData(section_storage, section);
+    }
     const Result<SectionDataRegion> region = FindSectionData(section);
     if (!region) {
         return std::unexpected(region.error());

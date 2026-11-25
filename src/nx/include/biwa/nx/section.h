@@ -30,7 +30,13 @@ struct SectionDataRegion {
 };
 Result<SectionDataRegion> FindSectionData(const NcaSection& section);
 
-// The file system bytes of a decrypted section.
-Result<StoragePtr> OpenSectionData(StoragePtr section_storage, const NcaSection& section);
+enum class HashCheck : std::uint8_t { kOff, kOn };
+
+// The file system bytes of a decrypted section. With HashCheck::kOn, every read is checked against
+// the section's hash tree: the top level is read here and checked against the master hash in the
+// header, and each block below is checked when it is read (Errc::kCorrupt on a mismatch).
+// Sections without hashes are returned unchecked.
+Result<StoragePtr> OpenSectionData(StoragePtr section_storage, const NcaSection& section,
+                                   HashCheck check = HashCheck::kOn);
 
 }  // namespace biwa::nx

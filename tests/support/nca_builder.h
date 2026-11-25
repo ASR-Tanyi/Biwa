@@ -10,6 +10,7 @@
 #include <cstring>
 #include <format>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -128,17 +129,83 @@ inline std::vector<std::byte> BuildNca(const NcaBuildOptions& options, const std
     return out;
 }
 
-// HierarchicalSha256 hash data with a hash table at 0 and the data layer at `data_offset`.
-inline std::array<std::byte, 0xF8> Sha256HashData(std::uint64_t data_offset, std::uint64_t data_size) {
+// SHA-256 of each `block_size` block of `data`; with `pad`, a short last block is hashed as if
+// filled with zeros (IVFC).
+inline std::vector<std::byte> HashBlocks(std::span<const std::byte> data, std::size_t block_size, bool pad) {
+    std::vector<std::byte> out;
+    for (std::size_t at = 0; at < data.size(); at += block_size) {
+        std::vector<std::byte> block(data.begin() + static_cast<std::ptrdiff_t>(at),
+                                     data.begin() + static_cast<std::ptrdiff_t>(std::min(data.size(), at + block_size)));
+        if (pad) {
+            block.resize(block_size);
+        }
+        const Sha256Digest digest = Sha256Of(block);
+        const auto* bytes = reinterpret_cast<const std::byte*>(digest.data());
+        out.insert(out.end(), bytes, bytes + digest.size());
+    }
+    return out;
+}
+
+// A section's plaintext with a hash tree over a payload, and the hash data that describes it.
+struct HashedSection {
+    std::array<std::byte, 0xF8> hash_data{};
+    std::vector<std::byte> data;
+    std::size_t payload_offset = 0;  // where the payload starts in `data`
+};
+
+// HierarchicalSha256 with two layers: the hash table at 0, `payload` at the next 0x200 boundary.
+inline HashedSection BuildSha256Section(const std::vector<std::byte>& payload, std::uint32_t block_size = 0x1000) {
+    const std::vector<std::byte> table = HashBlocks(payload, block_size, false);
+    HashedSection out;
+    out.payload_offset = (table.size() + 0x1FF) / 0x200 * 0x200;
+    out.data.resize(out.payload_offset);
+    std::ranges::copy(table, out.data.begin());
+    out.data.insert(out.data.end(), payload.begin(), payload.end());
+
     std::vector<std::byte> bytes(0xF8);
-    PutU32(bytes, 0x20, 0x1000);  // block size
-    PutU32(bytes, 0x24, 2);       // layers
+    const Sha256Digest master = Sha256Of(table);
+    std::memcpy(bytes.data(), master.data(), master.size());
+    PutU32(bytes, 0x20, block_size);
+    PutU32(bytes, 0x24, 2);  // layers
     PutU64(bytes, 0x28, 0);
-    PutU64(bytes, 0x30, 0x20);
-    PutU64(bytes, 0x38, data_offset);
-    PutU64(bytes, 0x40, data_size);
-    std::array<std::byte, 0xF8> out{};
-    std::ranges::copy(bytes, out.begin());
+    PutU64(bytes, 0x30, table.size());
+    PutU64(bytes, 0x38, out.payload_offset);
+    PutU64(bytes, 0x40, payload.size());
+    std::ranges::copy(bytes, out.hash_data.begin());
+    return out;
+}
+
+// IVFC with six levels of 2^block_order-byte blocks: hash levels 0 to 4 first, then `payload`,
+// each starting on a block boundary. The payload must be small enough for level 0 to be one block.
+inline HashedSection BuildIvfcSection(const std::vector<std::byte>& payload, std::uint32_t block_order = 9) {
+    const std::size_t block = std::size_t{1} << block_order;
+    std::array<std::vector<std::byte>, 6> levels;
+    levels[5] = payload;
+    for (std::size_t i = 5; i > 0; --i) {
+        levels[i - 1] = HashBlocks(levels[i], block, true);
+    }
+    const std::vector<std::byte> master = HashBlocks(levels[0], block, true);
+
+    HashedSection out;
+    std::vector<std::byte> bytes(0xF8);
+    PutU32(bytes, 0x00, 0x43465649);  // "IVFC"
+    PutU32(bytes, 0x04, 0x20000);
+    PutU32(bytes, 0x08, 0x20);
+    PutU32(bytes, 0x0C, 7);
+    for (std::size_t i = 0; i < levels.size(); ++i) {
+        const std::size_t at = 0x10 + i * 0x18;
+        PutU64(bytes, at, out.data.size());
+        PutU64(bytes, at + 8, levels[i].size());
+        PutU32(bytes, at + 0x10, block_order);
+        if (i == 5) {
+            out.payload_offset = out.data.size();
+        }
+        out.data.insert(out.data.end(), levels[i].begin(), levels[i].end());
+        out.data.resize((out.data.size() + block - 1) / block * block);
+    }
+    out.data.resize(out.payload_offset + payload.size());
+    std::memcpy(bytes.data() + 0xC0, master.data(), 0x20);
+    std::ranges::copy(bytes, out.hash_data.begin());
     return out;
 }
 

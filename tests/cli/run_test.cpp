@@ -131,9 +131,9 @@ void MakeTestNsp(TestNsp& t, bool with_ticket) {
     biwa::test::NcaBuildSection exefs;
     exefs.hash_type = biwa::nx::NcaHashType::kHierarchicalSha256;
     exefs.encryption = biwa::nx::NcaEncryption::kAesCtr;
-    exefs.hash_data = biwa::test::Sha256HashData(0x200, exefs_files.size());
-    exefs.data.resize(0x200);
-    exefs.data.insert(exefs.data.end(), exefs_files.begin(), exefs_files.end());
+    const biwa::test::HashedSection hashed = biwa::test::BuildSha256Section(exefs_files);
+    exefs.hash_data = hashed.hash_data;
+    exefs.data = hashed.data;
     biwa::test::NcaBuildOptions options;
     options.rights_id = kRightsId;
     options.ctr_key = biwa::test::TestKey(5);  // the title key
