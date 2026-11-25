@@ -11,7 +11,9 @@
 #include <vector>
 
 #include "biwa/core/file.h"
+#include "biwa/core/hex.h"
 #include "biwa/core/version.h"
+#include "support/nca_builder.h"
 #include "support/pfs0_builder.h"
 #include "support/temp_dir.h"
 
@@ -112,6 +114,68 @@ TEST(CliInfoTest, MapsErrorsToExitCodes) {
 
     EXPECT_EQ(RunBiwa({"info"}).code, biwa::cli::kExitUsage);
     EXPECT_EQ(RunBiwa({"info", "a", "b"}).code, biwa::cli::kExitUsage);
+}
+
+// An NSP holding a ticket and a program NCA (rights ID, encrypted ExeFS), plus matching keys.
+struct TestNsp {
+    biwa::test::TempDir dir;
+    std::string nsp;
+    std::string keys;
+};
+
+void MakeTestNsp(TestNsp& t, bool with_ticket) {
+    constexpr std::array<std::uint8_t, 16> kRightsId = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+                                                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05};
+    const std::vector<std::byte> exefs_files =
+        biwa::test::BuildPfs0({{"main", biwa::test::Bytes("code")}, {"main.npdm", biwa::test::Bytes("meta")}});
+    biwa::test::NcaBuildSection exefs;
+    exefs.hash_type = biwa::nx::NcaHashType::kHierarchicalSha256;
+    exefs.encryption = biwa::nx::NcaEncryption::kAesCtr;
+    exefs.hash_data = biwa::test::Sha256HashData(0x200, exefs_files.size());
+    exefs.data.resize(0x200);
+    exefs.data.insert(exefs.data.end(), exefs_files.begin(), exefs_files.end());
+    biwa::test::NcaBuildOptions options;
+    options.rights_id = kRightsId;
+    options.ctr_key = biwa::test::TestKey(5);  // the title key
+    std::vector<biwa::test::BuildFile> files = {
+        {"00112233445566778899aabbccddeeff.nca", biwa::test::BuildNca(options, {exefs})}};
+    if (with_ticket) {
+        files.push_back({"01000000000010000000000000000005.tik",
+                         biwa::test::BuildTicket(kRightsId, biwa::test::TestKey(5), biwa::test::TestKey(9))});
+    }
+    ASSERT_TRUE(biwa::WriteFileAtomic(t.dir / "game.nsp", biwa::test::BuildPfs0(files)).has_value());
+    const std::string keys = biwa::test::TestKeysText(biwa::test::TestKey(1), 0) +
+                             "titlekek_00 = " + biwa::ToHex(biwa::test::TestKey(9)) + "\n";
+    ASSERT_TRUE(biwa::WriteFileAtomic(t.dir / "prod.keys", std::as_bytes(std::span(keys))).has_value());
+    t.nsp = PathText(t.dir / "game.nsp");
+    t.keys = PathText(t.dir / "prod.keys");
+}
+
+TEST(CliInfoTest, WithKeysDescribesNcasAndListsTheExefs) {
+    TestNsp t;
+    MakeTestNsp(t, true);
+    const Result r = RunBiwa({"info", "-k", t.keys, t.nsp});
+    EXPECT_EQ(r.code, biwa::cli::kExitOk) << r.out << r.err;
+    EXPECT_NE(
+        r.out.find("  00112233445566778899aabbccddeeff.nca\n"
+                   "    program, title 0100000000001000, key generation 0, rights ID 01000000000010000000000000000005\n"
+                   "    section 0: PFS0, sha256, aes-ctr, 1024 bytes\n"
+                   "                   4  main\n"
+                   "                   4  main.npdm\n"),
+        std::string::npos)
+        << r.out;
+}
+
+TEST(CliInfoTest, MissingTicketIsReportedAndExitsWithMissingKeys) {
+    TestNsp t;
+    MakeTestNsp(t, false);
+    const Result r = RunBiwa({"info", "--keys", t.keys, t.nsp});
+    EXPECT_EQ(r.code, biwa::cli::kExitMissingKeys) << r.out;
+    EXPECT_NE(r.out.find("error: missing key: no ticket for rights ID 01000000000010000000000000000005"),
+              std::string::npos)
+        << r.out;
+    EXPECT_EQ(RunBiwa({"info", "-k"}).code, biwa::cli::kExitUsage);
+    EXPECT_EQ(RunBiwa({"info", "-k", PathText(t.dir / "nope.keys"), t.nsp}).code, biwa::cli::kExitInput);
 }
 
 TEST(CliTest, ExitCodesCoverEveryErrorCategory) {

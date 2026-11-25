@@ -3,19 +3,18 @@
 
 #include "biwa/cli/run.h"
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <format>
 #include <string>
 
 #include "biwa/core/version.h"
-#include "biwa/nx/pfs0.h"
-#include "biwa/nx/storage.h"
+#include "commands.h"
 
 namespace biwa::cli {
 namespace {
 
-using Args = std::span<const std::string_view>;
 using CommandFn = int (*)(Args args, std::ostream& out, std::ostream& err);
 
 struct Command {
@@ -25,56 +24,30 @@ struct Command {
     CommandFn run;
 };
 
-std::string PathText(const std::filesystem::path& path) {
-    const std::u8string text = path.u8string();
-    return {text.begin(), text.end()};
-}
-
-// `biwa <command>: <message>`, then the exit code for the error's category.
-int Report(std::string_view command, const Error& error, std::ostream& err) {
-    err << "biwa " << command << ": " << error.message() << '\n';
-    return ExitCodeFor(error.code());
-}
-
-int UsageError(const Command& command, std::string_view problem, std::ostream& err) {
-    err << "biwa " << command.name << ": " << problem << "\nusage: biwa " << command.name;
-    if (!command.usage.empty()) {
-        err << ' ' << command.usage;
-    }
-    err << '\n';
-    return kExitUsage;
-}
-
 int RunVersion(Args args, std::ostream& out, std::ostream& err);
 int RunHelp(Args args, std::ostream& out, std::ostream& err);
-int RunInfo(Args args, std::ostream& out, std::ostream& err);
 
 constexpr std::array kCommands = {
-    Command{"info", "<file>", "list what is inside a Switch file (NSP)", RunInfo},
+    Command{"info", "[-k <prod.keys>] <file>", "list what is inside an NSP; with keys, its NCAs too", RunInfo},
     Command{"version", "", "print Biwa's version", RunVersion},
     Command{"help", "", "print this text", RunHelp},
 };
 
-const Command& CommandNamed(std::string_view name) {
-    for (const Command& command : kCommands) {
-        if (command.name == name) {
-            return command;
-        }
-    }
-    return kCommands.back();  // only reached for names that exist
-}
-
 void PrintUsage(std::ostream& os) {
     os << "usage: biwa <command> [arguments]\n\ncommands:\n";
+    std::size_t width = 0;
+    for (const Command& command : kCommands) {
+        width = std::max(width, command.name.size() + 1 + command.usage.size());
+    }
     for (const Command& command : kCommands) {
         const std::string left = std::format("{} {}", command.name, command.usage);
-        os << std::format("  {:<16} {}\n", left, command.summary);
+        os << std::format("  {:<{}}  {}\n", left, width, command.summary);
     }
 }
 
 int RunVersion(Args args, std::ostream& out, std::ostream& err) {
     if (!args.empty()) {
-        return UsageError(CommandNamed("version"), std::format("unexpected argument '{}'", args[0]), err);
+        return UsageError("version", "", std::format("unexpected argument '{}'", args[0]), err);
     }
     out << "biwa " << Version() << " (" << SourceCommit() << ")\n";
     return kExitOk;
@@ -82,37 +55,32 @@ int RunVersion(Args args, std::ostream& out, std::ostream& err) {
 
 int RunHelp(Args args, std::ostream& out, std::ostream& err) {
     if (!args.empty()) {
-        return UsageError(CommandNamed("help"), std::format("unexpected argument '{}'", args[0]), err);
+        return UsageError("help", "", std::format("unexpected argument '{}'", args[0]), err);
     }
     PrintUsage(out);
     return kExitOk;
 }
 
-int RunInfo(Args args, std::ostream& out, std::ostream& err) {
-    if (args.size() != 1) {
-        return UsageError(CommandNamed("info"), args.empty() ? "a file is needed" : "only one file at a time", err);
-    }
-    const std::filesystem::path path(args[0]);
-    Result<nx::StoragePtr> storage = nx::OpenFileStorage(path);
-    if (!storage) {
-        return Report("info", storage.error(), err);
-    }
-    Result<nx::Pfs0> pfs = nx::Pfs0::Open(*storage);
-    if (!pfs) {
-        return Report("info", std::move(pfs).error().WithContext(PathText(path)), err);
-    }
-    std::uint64_t total = 0;
-    out << PathText(path) << "\n  PFS0, " << pfs->entries().size() << (pfs->entries().size() == 1 ? " file" : " files")
-        << '\n';
-    for (const nx::Pfs0Entry& entry : pfs->entries()) {
-        out << std::format("  {:>14}  {}\n", entry.size, entry.name);
-        total += entry.size;
-    }
-    out << std::format("  {:>14}  bytes in all\n", total);
-    return kExitOk;
+}  // namespace
+
+std::string PathText(const std::filesystem::path& path) {
+    const std::u8string text = path.u8string();
+    return {text.begin(), text.end()};
 }
 
-}  // namespace
+int Report(std::string_view command, const Error& error, std::ostream& err) {
+    err << "biwa " << command << ": " << error.message() << '\n';
+    return ExitCodeFor(error.code());
+}
+
+int UsageError(std::string_view command, std::string_view usage, std::string_view problem, std::ostream& err) {
+    err << "biwa " << command << ": " << problem << "\nusage: biwa " << command;
+    if (!usage.empty()) {
+        err << ' ' << usage;
+    }
+    err << '\n';
+    return kExitUsage;
+}
 
 int ExitCodeFor(Errc code) {
     switch (code) {
