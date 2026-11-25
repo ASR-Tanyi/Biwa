@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <format>
 #include <optional>
+#include <ostream>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -23,10 +24,12 @@
 #include "biwa/nx/cnmt.h"
 #include "biwa/nx/content.h"
 #include "biwa/nx/keys.h"
+#include "biwa/nx/nacp.h"
 #include "biwa/nx/nca.h"
 #include "biwa/nx/npdm.h"
 #include "biwa/nx/nso.h"
 #include "biwa/nx/pfs0.h"
+#include "biwa/nx/romfs.h"
 #include "biwa/nx/storage.h"
 #include "commands.h"
 
@@ -371,7 +374,8 @@ Status WriteExefs(const OpenedNca& program, const nx::KeySet& keys, const nx::Ti
         BIWA_RETURN_IF_ERROR(work.Write("modules/" + entry.name + ".bin", nso->image));
         BIWA_RETURN_IF_ERROR(work.WriteJsonFile("modules/" + entry.name + ".json", ModuleJson(entry.name, *nso)));
         out << std::format("  module {:<10} build ID {}, {} bytes\n", entry.name, ToHex(nso->build_id),
-                           nso->image.size());
+                           nso->image.size())
+            << std::flush;
     }
     return {};
 }
@@ -413,7 +417,7 @@ Status WriteRomfs(const Inputs& inputs, const OpenedNca& base_program, const nx:
         }
     }
     if (section == nullptr) {
-        out << "  no RomFS\n";
+        out << "  no RomFS\n" << std::flush;
         return {};
     }
     if (section->HasPatch()) {
@@ -429,7 +433,7 @@ Status WriteRomfs(const Inputs& inputs, const OpenedNca& base_program, const nx:
         return std::unexpected(std::move(fs).error().WithContext(program->name));
     }
     BIWA_RETURN_IF_ERROR(work.CopyImage("romfs.bin", **fs, ImageSource(*program, *section, check), options));
-    out << std::format("  romfs.bin {} bytes\n", (*fs)->Size());
+    out << std::format("  romfs.bin {} bytes\n", (*fs)->Size()) << std::flush;
     return {};
 }
 
@@ -459,9 +463,117 @@ Status WriteAddOnContent(const Inputs& inputs, const nx::KeySet& keys, const nx:
         }
         const std::string name = std::format("aoc/{}.bin", index);
         BIWA_RETURN_IF_ERROR(work.CopyImage(name, **fs, ImageSource(**data, *section, check), options));
-        out << std::format("  {} {} bytes\n", name, (*fs)->Size());
+        out << std::format("  {} {} bytes\n", name, (*fs)->Size()) << std::flush;
     }
     return {};
+}
+
+// The RomFS of a package's control NCA, if it has one.
+Result<std::optional<nx::Romfs>> OpenControl(const Package& package, const nx::KeySet& keys,
+                                             const nx::TicketMap& tickets, nx::HashCheck check) {
+    Result<const OpenedNca*> control = FindContent(package, nx::ContentType::kControl);
+    if (!control) {
+        return std::unexpected(control.error());
+    }
+    const nx::NcaSection* section = *control == nullptr ? nullptr : RomfsSection(**control);
+    if (section == nullptr) {
+        return std::optional<nx::Romfs>();
+    }
+    Result<nx::StoragePtr> fs =
+        nx::OpenSectionFs((*control)->storage, (*control)->header, *section, keys, tickets, check);
+    if (!fs) {
+        return std::unexpected(std::move(fs).error().WithContext((*control)->name));
+    }
+    Result<nx::Romfs> romfs = nx::Romfs::Open(std::move(*fs));
+    if (!romfs) {
+        return std::unexpected(std::move(romfs).error().WithContext((*control)->name));
+    }
+    return std::optional<nx::Romfs>(std::move(*romfs));
+}
+
+Result<std::vector<std::byte>> ReadControlFile(const nx::Romfs& romfs, std::string_view path) {
+    Result<nx::StoragePtr> file = romfs.OpenFile(path);
+    if (!file) {
+        return std::unexpected(file.error());
+    }
+    if ((*file)->Size() > (std::uint64_t{64} << 20)) {
+        return Failf(Errc::kCorrupt, "control file {} is {} bytes", path, (*file)->Size());
+    }
+    return ReadAll(**file);
+}
+
+Result<nx::Nacp> ReadNacp(const nx::Romfs& control) {
+    const Result<std::vector<std::byte>> bytes = ReadControlFile(control, "control.nacp");
+    if (!bytes) {
+        return std::unexpected(bytes.error());
+    }
+    return nx::ParseNacp(*bytes);
+}
+
+// control/: every file of the control RomFS, with the icons (icon_<language>.dat, JPEG) renamed
+// to .jpg.
+Status WriteControl(const nx::Romfs& control, WorkFolder& work) {
+    return control.ForEachFile([&](std::string_view path, std::uint64_t) -> Status {
+        const Result<std::vector<std::byte>> bytes = ReadControlFile(control, path);
+        if (!bytes) {
+            return std::unexpected(bytes.error());
+        }
+        std::string name(path.substr(1));  // without the leading '/'
+        if (name.starts_with("icon_") && name.ends_with(".dat")) {
+            name.replace(name.size() - 4, 4, ".jpg");
+        }
+        return work.Write("control/" + name, *bytes);
+    });
+}
+
+// The title for the manifest: the display version from `current` (the update's NACP when there is
+// one), the name and publisher from the first NACP whose titles are not compressed.
+Json TitleJson(const std::optional<nx::Nacp>& current, const std::optional<nx::Nacp>& base) {
+    if (!current) {
+        return nullptr;
+    }
+    const nx::Nacp* names = !current->titles_compressed        ? &*current
+                            : base && !base->titles_compressed ? &*base
+                                                               : nullptr;
+    const nx::NacpTitle* title = names == nullptr || names->titles.empty() ? nullptr : &names->titles.front();
+    return Json{{"name", title == nullptr ? Json(nullptr) : Json(title->name)},
+                {"publisher", title == nullptr ? Json(nullptr) : Json(title->publisher)},
+                {"display_version", current->display_version}};
+}
+
+// control/ (from `code`, the update when there is one: its display version is the current one),
+// and the title for the manifest, or null without a control NCA.
+Result<Json> WriteControlData(const Inputs& inputs, const Package& code, const nx::KeySet& keys,
+                              const nx::TicketMap& tickets, nx::HashCheck check, WorkFolder& work) {
+    std::optional<nx::Nacp> current_nacp;
+    std::optional<nx::Nacp> base_nacp;
+    Result<std::optional<nx::Romfs>> control = OpenControl(code, keys, tickets, check);
+    if (!control) {
+        return std::unexpected(control.error());
+    }
+    if (*control) {
+        Result<nx::Nacp> nacp = ReadNacp(**control);
+        if (!nacp) {
+            return std::unexpected(std::move(nacp).error().WithContext("control.nacp"));
+        }
+        BIWA_RETURN_IF_ERROR(WriteControl(**control, work));
+        current_nacp = std::move(*nacp);
+    }
+    if (inputs.update && current_nacp && current_nacp->titles_compressed) {
+        // Only for the names: the base game's NACP has them uncompressed.
+        Result<std::optional<nx::Romfs>> base_control = OpenControl(inputs.base, keys, tickets, check);
+        if (!base_control) {
+            return std::unexpected(base_control.error());
+        }
+        if (*base_control) {
+            Result<nx::Nacp> nacp = ReadNacp(**base_control);
+            if (!nacp) {
+                return std::unexpected(std::move(nacp).error().WithContext("control.nacp"));
+            }
+            base_nacp = std::move(*nacp);
+        }
+    }
+    return TitleJson(current_nacp, base_nacp);
 }
 
 Status Extract(const Inputs& inputs, const nx::KeySet& keys, const nx::TicketMap& tickets, nx::HashCheck check,
@@ -472,9 +584,10 @@ Status Extract(const Inputs& inputs, const nx::KeySet& keys, const nx::TicketMap
     if (inputs.update) {
         out << std::format(", update version {}", inputs.update->cnmt.version);
     }
-    out << '\n';
+    out << '\n' << std::flush;  // progress shows while the large copies run
 
-    // The update's ExeFS replaces the base game's.
+    // Small outputs first, so problems show before the large copies. The update's ExeFS replaces the
+    // base game's.
     const Package& code = inputs.update ? *inputs.update : base;
     Result<const OpenedNca*> program = FindContent(code, nx::ContentType::kProgram);
     if (!program) {
@@ -484,6 +597,17 @@ Status Extract(const Inputs& inputs, const nx::KeySet& keys, const nx::TicketMap
         return Failf(Errc::kCorrupt, "{} has no program NCA", PathText(code.path.filename()));
     }
     BIWA_RETURN_IF_ERROR(WriteExefs(**program, keys, tickets, check, work, out));
+
+    const Result<Json> title = WriteControlData(inputs, code, keys, tickets, check, work);
+    if (!title) {
+        return std::unexpected(title.error());
+    }
+    if (!title->is_null()) {
+        out << std::format("  control/ {} {}\n",
+                           (*title)["name"].is_string() ? (*title)["name"].get<std::string>() : "",
+                           (*title)["display_version"].get<std::string>())
+            << std::flush;
+    }
 
     Result<const OpenedNca*> base_program = FindContent(base, nx::ContentType::kProgram);
     if (!base_program) {
@@ -498,7 +622,8 @@ Status Extract(const Inputs& inputs, const nx::KeySet& keys, const nx::TicketMap
     Json manifest{{"format", 1},
                   {"biwa", std::format("{} ({})", Version(), SourceCommit())},
                   {"title_id", TitleText(base.cnmt.title_id)},
-                  {"version", base.cnmt.version}};
+                  {"version", base.cnmt.version},
+                  {"title", *title}};
     manifest["update"] = inputs.update ? Json{{"title_id", TitleText(inputs.update->cnmt.title_id)},
                                               {"version", inputs.update->cnmt.version}}
                                        : Json(nullptr);

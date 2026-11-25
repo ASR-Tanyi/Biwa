@@ -48,14 +48,16 @@ One per title:
 
 ```
 <work>/
-  manifest.json        title ID, base and update versions, DLC list, key generations, content IDs,
-                       SHA-256 of every output, the Biwa version that wrote it
+  manifest.json        title ID, name and display version, base and update versions, DLC list,
+                       each input's content IDs, every output's size and SHA-256 (for romfs.bin
+                       and aoc/, the NCA section and IVFC master hash they came from), the Biwa
+                       version that wrote it
   exefs/               main, main.npdm, rtld, sdk, subsdk0..9 as stored (NSO)
   modules/<name>.bin   each NSO decompressed to its memory image (.text, .rodata, .data at their offsets)
   modules/<name>.json  build ID, segment offsets and sizes, .bss, MOD0, .dynamic, .eh_frame_hdr range
   romfs.bin            the RomFS with the update applied, decrypted, in the standard RomFS layout
-  aoc/<index>.bin      DLC RomFS images
-  control/             control.nacp, icon_<language>.jpg
+  aoc/<index>.bin      DLC RomFS images, numbered from the application's ID + 0x1000
+  control/             control.nacp, icon_<language>.jpg (the update's, when there is one)
   npdm.json            main thread priority, stack size, ideal core, address space type, SVC mask
 ```
 
@@ -72,13 +74,12 @@ Later tools add `lift/`, `gen/`, `build/`, `coverage/`, `nro/`, `shaders/`, `sav
 
 ```
 biwa info [-k prod.keys] [--verify] <file.nsp>
-biwa extract -k prod.keys [-t title.keys] -o <work> <base.nsp> [<update.nsp>] [<dlc.nsp> ...]
-             [--no-verify] [-j N]
+biwa extract -k prod.keys -o <work> [--no-verify] [-j N] <base.nsp> [<update.nsp>] [<dlc.nsp> ...]
 biwa romfs ls  [-k prod.keys] [-u update.nsp] [-r] <file> [path]
 biwa romfs cat [-k prod.keys] [-u update.nsp] [-o out] <file> <path>
 ```
 
-`romfs` reads a work folder, a RomFS image, or an NSP directly (its program or add-on data NCA, with `-k`); `-u` lays an update's patch over the base game's RomFS.
+`extract` takes its NSPs in any order and sorts them by their content meta. Small outputs are written first, then `romfs.bin` and `aoc/`, then the manifest. `romfs` reads a work folder, a RomFS image, or an NSP directly (its program or add-on data NCA, with `-k`); `-u` lays an update's patch over the base game's RomFS.
 
 | Exit code | Meaning |
 |---|---|

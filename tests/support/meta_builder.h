@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string_view>
 #include <vector>
 
 #include "support/pfs0_builder.h"
@@ -71,6 +72,20 @@ inline std::vector<std::byte> BuildNpdm(const std::vector<std::uint32_t>& caps,
     std::memcpy(out.data() + 0x100 + 0x200, "ACID", 4);
     PutU64(out, 0x100 + 0x210, program_id);
     PutU64(out, 0x100 + 0x218, program_id | 0xFF);
+    return out;
+}
+
+// control.nacp with the AmericanEnglish title; with `compressed`, marked as having compressed
+// titles (the title area is then left as zeros).
+inline std::vector<std::byte> BuildNacp(std::string_view name, std::string_view publisher,
+                                        std::string_view display_version, bool compressed = false) {
+    std::vector<std::byte> out(0x4000);
+    if (!compressed) {
+        std::memcpy(out.data(), name.data(), name.size());
+        std::memcpy(out.data() + 0x200, publisher.data(), publisher.size());
+    }
+    std::memcpy(out.data() + 0x3060, display_version.data(), display_version.size());
+    out[0x3215] = compressed ? std::byte{1} : std::byte{0};
     return out;
 }
 

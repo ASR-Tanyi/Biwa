@@ -21,6 +21,12 @@ using biwa::test::RunBiwa;
 
 constexpr std::uint64_t kTitle = 0x0100000000004000;
 
+// A control NCA section: control.nacp and one icon.
+biwa::test::NcaBuildSection ControlSection(const std::vector<std::byte>& nacp) {
+    return biwa::test::RomfsSection(biwa::test::BuildIvfcSection(biwa::test::BuildRomfs(
+        {{"control.nacp", nacp}, {"icon_AmericanEnglish.dat", biwa::test::Bytes("\xFF\xD8 jpeg")}})));
+}
+
 // A base game with a RomFS, its update (new code and a patch over the RomFS) and one add-on
 // content, on disk, with keys for all of them.
 struct Game {
@@ -43,6 +49,7 @@ struct Game {
 
         biwa::test::TitleBuild base_title;
         base_title.program_sections = {biwa::test::ExefsSection(0x11, kTitle), biwa::test::RomfsSection(old_hashed)};
+        base_title.control_sections = {ControlSection(biwa::test::BuildNacp("Test Game", "Test Publisher", "1.0.0"))};
 
         biwa::test::TitleBuild update_title;
         update_title.meta_type = 0x81;
@@ -60,6 +67,7 @@ struct Game {
         romfs.patch_info = patch.patch_info;
         romfs.data = patch.data;
         update_title.program_sections = {exefs, romfs};
+        update_title.control_sections = {ControlSection(biwa::test::BuildNacp("", "", "1.1.0", true))};
 
         biwa::test::TitleBuild dlc_title;
         dlc_title.meta_type = 0x82;
@@ -161,6 +169,28 @@ TEST(CliExtractTest, WritesTheRomfsWithTheUpdateAndAddOnContent) {
     const auto base_only = RunBiwa({"extract", "-k", game.keys, "-o", game.work, game.base});
     ASSERT_EQ(base_only.code, biwa::cli::kExitOk) << base_only.err;
     EXPECT_EQ(biwa::ReadFileBytes(work / "romfs.bin").value_or(std::vector<std::byte>{}), game.old_image);
+}
+
+TEST(CliExtractTest, WritesControlDataAndTheTitle) {
+    const Game game;
+    auto r = RunBiwa({"extract", "-k", game.keys, "-o", game.work, game.base});
+    ASSERT_EQ(r.code, biwa::cli::kExitOk) << r.err;
+    const std::filesystem::path work(game.work);
+    EXPECT_TRUE(std::filesystem::exists(work / "control/control.nacp"));
+    EXPECT_EQ(biwa::ReadFileText(work / "control/icon_AmericanEnglish.jpg").value_or(""), "\xFF\xD8 jpeg");
+    auto manifest = biwa::ReadJson(work / "manifest.json");
+    ASSERT_TRUE(manifest.has_value());
+    EXPECT_EQ((*manifest)["title"]["name"], "Test Game");
+    EXPECT_EQ((*manifest)["title"]["publisher"], "Test Publisher");
+    EXPECT_EQ((*manifest)["title"]["display_version"], "1.0.0");
+
+    // The update's NACP has compressed titles: its version, the base game's names.
+    r = RunBiwa({"extract", "-k", game.keys, "-o", game.work, game.base, game.update});
+    ASSERT_EQ(r.code, biwa::cli::kExitOk) << r.err;
+    manifest = biwa::ReadJson(work / "manifest.json");
+    ASSERT_TRUE(manifest.has_value());
+    EXPECT_EQ((*manifest)["title"]["name"], "Test Game");
+    EXPECT_EQ((*manifest)["title"]["display_version"], "1.1.0");
 }
 
 TEST(CliExtractTest, ProblemsHaveExitCodes) {

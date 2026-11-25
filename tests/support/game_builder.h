@@ -26,7 +26,8 @@ struct TitleBuild {
     std::uint64_t related = 0x0100000000004800;
     std::uint8_t id_seed = 0x10;  // makes NCA IDs unique between packages
     std::vector<NcaBuildSection> program_sections;
-    std::vector<NcaBuildSection> data_sections;  // add-on content
+    std::vector<NcaBuildSection> data_sections;     // add-on content
+    std::vector<NcaBuildSection> control_sections;  // the control NCA
 };
 
 inline NcaBuildOptions TitleNcaOptions(nx::NcaContentType type, std::uint64_t title_id) {
@@ -99,6 +100,16 @@ inline std::vector<std::byte> BuildTitleNsp(const TitleBuild& title) {
         data.size = nca.size();
         contents.push_back(data);
         files.push_back({ToHex(data.id) + ".nca", nca});
+    }
+    if (!title.control_sections.empty()) {
+        CnmtBuildContent control;
+        control.id[0] = static_cast<std::uint8_t>(title.id_seed + 3);
+        control.type = 3;
+        const std::vector<std::byte> nca =
+            BuildNca(TitleNcaOptions(nx::NcaContentType::kControl, title.title_id), title.control_sections);
+        control.size = nca.size();
+        contents.push_back(control);
+        files.push_back({ToHex(control.id) + ".nca", nca});
     }
     std::array<std::uint8_t, 0x10> meta_id{};
     meta_id[0] = static_cast<std::uint8_t>(title.id_seed + 1);
