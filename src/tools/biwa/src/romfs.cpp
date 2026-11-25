@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Biwa contributors
 
-// `biwa romfs ls|cat`: look inside a RomFS, either a RomFS image or the RomFS of an NSP's program
-// (or add-on data) NCA.
+// `biwa romfs ls|cat`: look inside a RomFS: a work folder's romfs.bin, a RomFS image, or the RomFS
+// of an NSP's program (or add-on data) NCA.
 
 #include "biwa/nx/romfs.h"
 
@@ -13,6 +13,7 @@
 #include <format>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "biwa/cli/run.h"
@@ -127,9 +128,16 @@ Result<nx::Romfs> OpenPackageRomfs(const nx::StoragePtr& storage, const std::opt
     return nx::Romfs::Open(std::move(*fs));
 }
 
-// `file` is an NSP (keys needed) or a RomFS image.
+// `file` is a work folder (its romfs.bin), an NSP (keys needed) or a RomFS image.
 Result<nx::Romfs> OpenRomfs(const std::filesystem::path& path, const std::optional<std::filesystem::path>& update,
                             const std::optional<nx::KeySet>& keys, std::ostream& err) {
+    std::error_code ec;
+    if (std::filesystem::is_directory(path, ec)) {
+        if (update) {
+            return Fail(Errc::kInvalidArgument, "-u needs the base game's NSP, not a work folder");
+        }
+        return OpenRomfs(path / "romfs.bin", std::nullopt, keys, err);
+    }
     Result<nx::StoragePtr> storage = nx::OpenFileStorage(path);
     if (!storage) {
         return std::unexpected(std::move(storage).error());

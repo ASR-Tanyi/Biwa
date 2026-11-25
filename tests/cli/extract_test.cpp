@@ -165,6 +165,11 @@ TEST(CliExtractTest, WritesTheRomfsWithTheUpdateAndAddOnContent) {
     EXPECT_EQ((*romfs)["source"]["nca"], biwa::ToHex(std::array<std::uint8_t, 16>{0x20}) + ".nca");
     EXPECT_EQ((*romfs)["source"]["hashes_checked"], true);
 
+    // romfs reads the work folder's romfs.bin.
+    const auto ls = RunBiwa({"romfs", "cat", game.work, "b.txt"});
+    EXPECT_EQ(ls.code, biwa::cli::kExitOk) << ls.err;
+    EXPECT_EQ(ls.out, "b");
+
     // Without the update, the base game's RomFS.
     const auto base_only = RunBiwa({"extract", "-k", game.keys, "-o", game.work, game.base});
     ASSERT_EQ(base_only.code, biwa::cli::kExitOk) << base_only.err;
