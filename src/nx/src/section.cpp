@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "biwa/nx/compressed.h"
 #include "biwa/nx/hash.h"
 
 namespace biwa::nx {
@@ -174,35 +175,35 @@ Result<StoragePtr> OpenNcaSection(StoragePtr nca, const NcaSection& section, con
     if (section.HasSparse()) {
         return Failf(Errc::kUnsupported, "section {} is sparse; sparse sections are not supported yet", section.index);
     }
-    if (section.HasCompression()) {
-        return Failf(Errc::kUnsupported, "section {} is compressed; compressed sections are not supported yet",
-                     section.index);
-    }
     Result<StoragePtr> raw =
         MakeSubStorage(std::move(nca), section.offset, section.size, std::format("NCA section {}", section.index));
     if (!raw) {
         return raw;
     }
+    StoragePtr decrypted;
     switch (section.encryption) {
         case NcaEncryption::kNone:
-            return raw;
+            decrypted = std::move(*raw);
+            break;
         case NcaEncryption::kAesCtr:
         case NcaEncryption::kAesCtrSkipLayerHash:
             if (!ctr_key) {
                 return Failf(Errc::kInternal, "section {} is AES-CTR encrypted but no key was given", section.index);
             }
-            return MakeAesCtrStorage(std::move(*raw), *ctr_key, section.counter_upper, section.offset);
+            decrypted = MakeAesCtrStorage(std::move(*raw), *ctr_key, section.counter_upper, section.offset);
+            break;
         default:
             return Failf(Errc::kUnsupported, "section {} uses {} encryption, which is not supported yet", section.index,
                          EncryptionName(section.encryption));
     }
+    return decrypted;
 }
 
-Result<SectionDataRegion> FindSectionData(const NcaSection& section) {
+Result<SectionDataRegion> FindSectionData(const NcaSection& section, std::uint64_t storage_size) {
     SectionDataRegion region;
     switch (section.hash_type) {
         case NcaHashType::kNone:
-            region = {0, section.size};
+            region = {0, storage_size};
             break;
         case NcaHashType::kHierarchicalSha256: {
             // master hash (0x20), block size (u32), layer count (u32), regions [5] x {offset, size}
@@ -231,23 +232,41 @@ Result<SectionDataRegion> FindSectionData(const NcaSection& section) {
             return Failf(Errc::kUnsupported, "section {} uses {} hashing, which is not supported yet", section.index,
                          HashTypeName(section.hash_type));
     }
-    if (!RangeFits(region.offset, region.size, section.size)) {
+    if (!RangeFits(region.offset, region.size, storage_size)) {
         return Failf(Errc::kCorrupt, "section {}: data ({:#x} bytes at {:#x}) is outside the section ({:#x})",
-                     section.index, region.size, region.offset, section.size);
+                     section.index, region.size, region.offset, storage_size);
     }
     return region;
 }
 
-Result<StoragePtr> OpenSectionData(StoragePtr section_storage, const NcaSection& section, HashCheck check) {
+namespace {
+
+// The file system level of the section, as stored (compressed sections still compressed).
+Result<StoragePtr> OpenStoredData(StoragePtr section_storage, const NcaSection& section, HashCheck check) {
     if (check == HashCheck::kOn && section.hash_type != NcaHashType::kNone) {
         return OpenCheckedData(section_storage, section);
     }
-    const Result<SectionDataRegion> region = FindSectionData(section);
+    const Result<SectionDataRegion> region = FindSectionData(section, section_storage->Size());
     if (!region) {
         return std::unexpected(region.error());
     }
     return MakeSubStorage(std::move(section_storage), region->offset, region->size,
                           std::format("section {} data", section.index));
+}
+
+}  // namespace
+
+Result<StoragePtr> OpenSectionData(StoragePtr section_storage, const NcaSection& section, HashCheck check) {
+    Result<StoragePtr> data = OpenStoredData(std::move(section_storage), section, check);
+    if (!data || !section.HasCompression()) {
+        return data;
+    }
+    // Compression sits above the hash layer: the hashes cover the stored (compressed) bytes.
+    Result<StoragePtr> decompressed = MakeCompressedStorage(std::move(*data), section.compression_info);
+    if (!decompressed) {
+        return std::unexpected(std::move(decompressed).error().WithContext(std::format("section {}", section.index)));
+    }
+    return decompressed;
 }
 
 }  // namespace biwa::nx

@@ -9,8 +9,11 @@
 #include <vector>
 
 #include "biwa/nx/pfs0.h"
+#include "biwa/nx/romfs.h"
 #include "biwa/nx/ticket.h"
+#include "support/compressed_builder.h"
 #include "support/nca_builder.h"
+#include "support/romfs_builder.h"
 
 namespace {
 
@@ -100,14 +103,14 @@ TEST(SectionTest, FindsIvfcDataLevel) {
     biwa::test::PutU64(hash, 0x10 + 5 * 0x18, 0x8000);
     biwa::test::PutU64(hash, 0x10 + 5 * 0x18 + 8, 0x20000);
     std::ranges::copy(hash, section.hash_data.begin());
-    const auto region = biwa::nx::FindSectionData(section);
+    const auto region = biwa::nx::FindSectionData(section, section.size);
     ASSERT_TRUE(region.has_value()) << region.error();
     EXPECT_EQ(region->offset, 0x8000u);
     EXPECT_EQ(region->size, 0x20000u);
 
     biwa::test::PutU64(hash, 0x10 + 5 * 0x18 + 8, 0x200000);  // past the section
     std::ranges::copy(hash, section.hash_data.begin());
-    EXPECT_EQ(biwa::nx::FindSectionData(section).error().code(), Errc::kCorrupt);
+    EXPECT_EQ(biwa::nx::FindSectionData(section, section.size).error().code(), Errc::kCorrupt);
 }
 
 // A program NCA with one AES-CTR section built from `hashed`.
@@ -190,20 +193,52 @@ TEST(SectionTest, ChecksSha256Sections) {
     EXPECT_TRUE(OpenData(damaged, biwa::nx::HashCheck::kOff).has_value());
 }
 
+TEST(SectionTest, OpensCompressedSections) {
+    std::vector<std::byte> big(0x3000);  // zeros
+    const std::vector<std::byte> image = biwa::test::BuildRomfs({
+        {"a/b.txt", Bytes("text in a compressed section")},
+        {"big.bin", big},
+    });
+    // Compression is above the hash layer: the hash tree covers the stored bytes.
+    const biwa::test::CompressedSection packed = biwa::test::BuildCompressedSection(image, 0x400);
+    const biwa::test::HashedSection hashed = biwa::test::BuildIvfcSection(packed.data);
+    biwa::test::NcaBuildSection section;
+    section.fs_type = NcaFsType::kRomFs;
+    section.hash_type = NcaHashType::kHierarchicalIntegrity;
+    section.encryption = NcaEncryption::kAesCtr;
+    section.hash_data = hashed.hash_data;
+    section.compression_info = packed.compression_info;
+    section.data = hashed.data;
+    biwa::test::NcaBuildOptions options;
+    options.key_area_key = biwa::test::TestKey(1);
+    options.key_area[2] = biwa::test::TestKey(7);
+
+    const auto data = OpenData(biwa::test::BuildNca(options, {section}));
+    ASSERT_TRUE(data.has_value()) << data.error();
+    const auto romfs = biwa::nx::Romfs::Open(*data);
+    ASSERT_TRUE(romfs.has_value()) << romfs.error();
+    const auto file = romfs->OpenFile("a/b.txt");
+    ASSERT_TRUE(file.has_value()) << file.error();
+    EXPECT_EQ(ReadAll(**file), "text in a compressed section");
+    const auto zeros = romfs->OpenFile("big.bin");
+    ASSERT_TRUE(zeros.has_value()) << zeros.error();
+    EXPECT_EQ(ReadAll(**zeros), std::string(0x3000, '\0'));
+}
+
 TEST(SectionTest, UnsupportedLayersSaySo) {
-    biwa::test::NcaBuildSection compressed;
-    compressed.data.resize(0x200);
-    compressed.compression_info[0x08] = std::byte{0x10};  // table size
+    biwa::test::NcaBuildSection sparse;
+    sparse.data.resize(0x200);
+    sparse.sparse_info[0x28] = std::byte{0x01};  // generation
     biwa::test::NcaBuildSection patch;
     patch.data.resize(0x200);
     patch.patch_info[0x08] = std::byte{0x10};  // indirect table size
-    const auto nca = biwa::nx::MakeMemoryStorage(biwa::test::BuildNca({}, {compressed, patch}));
+    const auto nca = biwa::nx::MakeMemoryStorage(biwa::test::BuildNca({}, {sparse, patch}));
     const auto header = biwa::nx::ReadNcaHeader(*nca, Keys());
     ASSERT_TRUE(header.has_value()) << header.error();
     const auto first = biwa::nx::OpenNcaSection(nca, header->sections[0], std::nullopt);
     ASSERT_FALSE(first.has_value());
     EXPECT_EQ(first.error().code(), Errc::kUnsupported);
-    EXPECT_NE(first.error().message().find("compressed"), std::string::npos);
+    EXPECT_NE(first.error().message().find("sparse"), std::string::npos);
     EXPECT_EQ(biwa::nx::OpenNcaSection(nca, header->sections[1], std::nullopt).error().code(), Errc::kUnsupported);
 }
 

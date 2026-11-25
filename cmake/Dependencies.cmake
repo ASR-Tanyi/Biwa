@@ -17,6 +17,18 @@ set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
 set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(mbedtls)
 
+# LZ4 1.10.0: LZ4 blocks in NSO segments and compressed NCA sections. The library is one file,
+# lib/lz4.c, built here; LZ4's own CMake project (under build/cmake) is not used.
+FetchContent_Declare(lz4
+    URL https://github.com/lz4/lz4/releases/download/v1.10.0/lz4-1.10.0.tar.gz
+    URL_HASH SHA256=537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b
+    EXCLUDE_FROM_ALL
+    SYSTEM)
+FetchContent_MakeAvailable(lz4)
+add_library(biwa_lz4 STATIC ${lz4_SOURCE_DIR}/lib/lz4.c)
+target_include_directories(biwa_lz4 SYSTEM PUBLIC ${lz4_SOURCE_DIR}/lib)
+add_library(LZ4::lz4 ALIAS biwa_lz4)
+
 # nlohmann/json 3.12.0: manifests, profiles, cache indexes.
 FetchContent_Declare(nlohmann_json
     URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz

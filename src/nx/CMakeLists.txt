@@ -4,6 +4,7 @@
 # Switch formats (docs/design/03-extract.md).
 biwa_add_module(nx LAYER 1
     SOURCES
+        src/compressed.cpp
         src/content.cpp
         src/crypto.cpp
         src/hash.cpp
@@ -15,4 +16,4 @@ biwa_add_module(nx LAYER 1
         src/storage.cpp
         src/ticket.cpp
     DEPS core)
-target_link_libraries(biwa_nx PRIVATE MbedTLS::mbedcrypto)
+target_link_libraries(biwa_nx PRIVATE MbedTLS::mbedcrypto LZ4::lz4)
