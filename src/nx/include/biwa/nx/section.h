@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 
 #include "biwa/core/error.h"
 #include "biwa/nx/crypto.h"
@@ -12,6 +13,12 @@
 #include "biwa/nx/storage.h"
 
 namespace biwa::nx {
+
+// Reads [offset, offset + out.size()) of `raw` and decrypts it with AES-CTR. `raw`'s first byte
+// sits at `base_offset` in the NCA (the counter counts from the start of the NCA). Any offset and
+// length; the range must be inside `raw`.
+Status ReadAesCtr(const Storage& raw, const Aes128Key& key, std::uint64_t counter_upper, std::uint64_t base_offset,
+                  std::uint64_t offset, std::span<std::byte> out);
 
 // AES-CTR over `base`, whose first byte sits at `base_offset` in the NCA (the counter counts from
 // the start of the NCA).

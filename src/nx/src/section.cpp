@@ -29,22 +29,7 @@ class AesCtrStorage final : public Storage {
         if (!RangeFits(offset, out.size(), Size())) {
             return ReadPastEnd(offset, out.size(), Size());
         }
-        if (out.empty()) {
-            return {};
-        }
-        if (offset % kBlock == 0) {
-            // The common case: decrypt in place.
-            BIWA_RETURN_IF_ERROR(base_->Read(offset, out));
-            AesCtrCrypt(key_, NcaCounter(counter_upper_, base_offset_ + offset), out);
-            return {};
-        }
-        const std::uint64_t start = offset / kBlock * kBlock;
-        const std::uint64_t end = std::min(Size(), (offset + out.size() + kBlock - 1) / kBlock * kBlock);
-        std::vector<std::byte> buffer(static_cast<std::size_t>(end - start));
-        BIWA_RETURN_IF_ERROR(base_->Read(start, buffer));
-        AesCtrCrypt(key_, NcaCounter(counter_upper_, base_offset_ + start), buffer);
-        std::copy_n(buffer.begin() + static_cast<std::ptrdiff_t>(offset - start), out.size(), out.begin());
-        return {};
+        return ReadAesCtr(*base_, key_, counter_upper_, base_offset_, offset, out);
     }
 
    private:
@@ -162,6 +147,26 @@ Result<StoragePtr> OpenCheckedData(const StoragePtr& section_storage, const NcaS
 }
 
 }  // namespace
+
+Status ReadAesCtr(const Storage& raw, const Aes128Key& key, std::uint64_t counter_upper, std::uint64_t base_offset,
+                  std::uint64_t offset, std::span<std::byte> out) {
+    if (out.empty()) {
+        return {};
+    }
+    if (offset % kBlock == 0) {
+        // The common case: decrypt in place.
+        BIWA_RETURN_IF_ERROR(raw.Read(offset, out));
+        AesCtrCrypt(key, NcaCounter(counter_upper, base_offset + offset), out);
+        return {};
+    }
+    const std::uint64_t start = offset / kBlock * kBlock;
+    const std::uint64_t end = std::min(raw.Size(), (offset + out.size() + kBlock - 1) / kBlock * kBlock);
+    std::vector<std::byte> buffer(static_cast<std::size_t>(end - start));
+    BIWA_RETURN_IF_ERROR(raw.Read(start, buffer));
+    AesCtrCrypt(key, NcaCounter(counter_upper, base_offset + start), buffer);
+    std::copy_n(buffer.begin() + static_cast<std::ptrdiff_t>(offset - start), out.size(), out.begin());
+    return {};
+}
 
 StoragePtr MakeAesCtrStorage(StoragePtr base, const Aes128Key& key, std::uint64_t counter_upper,
                              std::uint64_t base_offset) {
