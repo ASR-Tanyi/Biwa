@@ -36,6 +36,6 @@ endforeach()
 file(CONFIGURE OUTPUT ${biwa_a64_ops} CONTENT "${biwa_a64_text}" @ONLY)
 
 biwa_add_module(a64 LAYER 1
-    SOURCES src/decoder.cpp
+    SOURCES src/decoder.cpp src/interpreter.cpp
     DEPS core)
 target_include_directories(biwa_a64 PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/generated)

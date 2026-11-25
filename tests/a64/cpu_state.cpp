@@ -3,7 +3,9 @@
 
 #include "a64/cpu_state.h"
 
+#include <algorithm>
 #include <format>
+#include <iterator>
 
 namespace biwa::test {
 namespace {
@@ -42,6 +44,38 @@ CpuState RandomState(std::mt19937_64& rng) {
     }
     state.tpidr_el0 = rng();
     state.tpidrro_el0 = rng();
+    return state;
+}
+
+BiwaCpu ToBiwa(const CpuState& state) {
+    BiwaCpu cpu{};
+    std::ranges::copy(state.x, std::begin(cpu.x));
+    cpu.sp = state.sp;
+    cpu.pc = state.pc;
+    cpu.nzcv = state.nzcv;
+    cpu.fpcr = state.fpcr;
+    cpu.fpsr = state.fpsr;
+    for (std::size_t i = 0; i < state.v.size(); ++i) {
+        std::ranges::copy(state.v[i], std::begin(cpu.v[i]));
+    }
+    cpu.tpidr_el0 = state.tpidr_el0;
+    cpu.tpidrro_el0 = state.tpidrro_el0;
+    return cpu;
+}
+
+CpuState FromBiwa(const BiwaCpu& cpu) {
+    CpuState state;
+    std::ranges::copy(cpu.x, state.x.begin());
+    state.sp = cpu.sp;
+    state.pc = cpu.pc;
+    state.nzcv = cpu.nzcv;
+    state.fpcr = cpu.fpcr;
+    state.fpsr = cpu.fpsr;
+    for (std::size_t i = 0; i < state.v.size(); ++i) {
+        std::ranges::copy(cpu.v[i], state.v[i].begin());
+    }
+    state.tpidr_el0 = cpu.tpidr_el0;
+    state.tpidrro_el0 = cpu.tpidrro_el0;
     return state;
 }
 

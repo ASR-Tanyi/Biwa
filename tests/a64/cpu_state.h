@@ -8,6 +8,8 @@
 #include <random>
 #include <string>
 
+#include "biwa/a64/cpu.h"
+
 namespace biwa::test {
 
 // The A64 state the CPU tests compare: what an EL0 instruction can read or change.
@@ -29,6 +31,10 @@ struct CpuState {
 // Integer registers sometimes hold small or edge values (0, -1, sign bits) so flags and carries are
 // exercised. `sp` and `pc` are left to the caller.
 CpuState RandomState(std::mt19937_64& rng);
+
+// Between the test state and the runtime's BiwaCpu (the exclusive monitor and thread stay clear).
+BiwaCpu ToBiwa(const CpuState& state);
+CpuState FromBiwa(const BiwaCpu& cpu);
 
 // The registers that differ, one per line ("x3: 0x... != 0x..."); empty when equal.
 std::string Diff(const CpuState& expected, const CpuState& actual);

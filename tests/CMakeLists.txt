@@ -20,12 +20,16 @@ biwa_add_test(core_test
     DEPS core)
 target_compile_definitions(core_test PRIVATE BIWA_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
 
-biwa_add_test(a64_test SOURCES a64/capstone_test.cpp a64/decoder_test.cpp a64/sweep.cpp DEPS a64)
+biwa_add_test(a64_test
+    SOURCES a64/capstone_test.cpp a64/decoder_test.cpp a64/interpreter_test.cpp a64/sem_c_test.c a64/sweep.cpp
+    DEPS a64)
 target_link_libraries(a64_test PRIVATE capstone_static)
 
 if(BIWA_UNICORN)
     # The reference CPU harness and the tests that compare with it.
-    biwa_add_test(a64_unicorn_test SOURCES a64/cpu_state.cpp a64/unicorn_cpu.cpp a64/unicorn_test.cpp DEPS a64)
+    biwa_add_test(a64_unicorn_test
+        SOURCES a64/cpu_state.cpp a64/semantics_test.cpp a64/unicorn_cpu.cpp a64/unicorn_test.cpp
+        DEPS a64)
     target_link_libraries(a64_unicorn_test PRIVATE unicorn)
 endif()
 
