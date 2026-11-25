@@ -89,7 +89,7 @@ Result<StoragePtr> MakeSubStorage(StoragePtr base, std::uint64_t offset, std::ui
     return std::make_shared<SubStorage>(std::move(base), offset, size);
 }
 
-Status CopyStorage(const Storage& from, OutputFile& to, std::uint64_t to_offset, CopyOptions options) {
+Status ForEachPiece(const Storage& from, const PieceFn& fn, CopyOptions options) {
     const std::uint64_t size = from.Size();
     const std::size_t piece = std::max<std::size_t>(options.piece_size, 1);
     const std::uint64_t pieces = (size + piece - 1) / piece;
@@ -102,7 +102,7 @@ Status CopyStorage(const Storage& from, OutputFile& to, std::uint64_t to_offset,
     std::optional<Error> first_error;
 
     auto worker = [&] {
-        std::vector<std::byte> buffer(piece);
+        std::vector<std::byte> buffer(static_cast<std::size_t>(std::min<std::uint64_t>(piece, size)));
         while (!failed.load(std::memory_order_relaxed)) {
             const std::uint64_t index = next.fetch_add(1, std::memory_order_relaxed);
             if (index >= pieces) {
@@ -113,7 +113,7 @@ Status CopyStorage(const Storage& from, OutputFile& to, std::uint64_t to_offset,
             const std::span<std::byte> chunk(buffer.data(), length);
             Status status = from.Read(offset, chunk);
             if (status) {
-                status = to.WriteAt(to_offset + offset, chunk);
+                status = fn(offset, chunk);
             }
             if (!status) {
                 const std::scoped_lock lock(error_mutex);
@@ -138,6 +138,15 @@ Status CopyStorage(const Storage& from, OutputFile& to, std::uint64_t to_offset,
         return std::unexpected(std::move(*first_error));
     }
     return {};
+}
+
+Status CopyStorage(const Storage& from, OutputFile& to, std::uint64_t to_offset, CopyOptions options) {
+    return ForEachPiece(
+        from,
+        [&to, to_offset](std::uint64_t offset, std::span<const std::byte> piece) {
+            return to.WriteAt(to_offset + offset, piece);
+        },
+        options);
 }
 
 }  // namespace biwa::nx

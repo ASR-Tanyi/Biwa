@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -68,6 +69,12 @@ struct CopyOptions {
     unsigned threads = 0;                           // 0: one per hardware thread
     std::size_t piece_size = std::size_t{8} << 20;  // bytes per read / write
 };
+
+// Reads all of `from` in pieces over several threads and passes each piece, with its offset, to
+// `fn`, which is called from those threads at once. Stops at the first error (from a read or from
+// `fn`) and returns it.
+using PieceFn = std::function<Status(std::uint64_t offset, std::span<const std::byte> piece)>;
+Status ForEachPiece(const Storage& from, const PieceFn& fn, CopyOptions options = {});
 
 // Copies all of `from` to `to` starting at `to_offset`, in pieces over several threads. Stops at
 // the first error and returns it.

@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <mutex>
+#include <span>
 #include <vector>
 
 #include "biwa/core/file.h"
@@ -112,6 +114,41 @@ TEST(StorageTest, CopyUsesSeveralThreadsAndOddSizes) {
     ASSERT_TRUE(back.has_value());
     ASSERT_EQ(back->size(), data.size() + 7);
     EXPECT_TRUE(std::equal(data.begin(), data.end(), back->begin() + 7));
+}
+
+TEST(StorageTest, ForEachPieceSeesEveryByteOnce) {
+    const std::vector<std::byte> data = Counting(50001);
+    const StoragePtr from = biwa::nx::MakeMemoryStorage(data);
+    std::vector<int> seen(data.size(), 0);
+    std::mutex mutex;
+    const auto status = biwa::nx::ForEachPiece(
+        *from,
+        [&](std::uint64_t offset, std::span<const std::byte> piece) -> biwa::Status {
+            const std::scoped_lock lock(mutex);
+            for (std::size_t i = 0; i < piece.size(); ++i) {
+                EXPECT_EQ(piece[i], data[offset + i]);
+                ++seen[offset + i];
+            }
+            return {};
+        },
+        {.threads = 3, .piece_size = 1000});
+    ASSERT_TRUE(status.has_value());
+    EXPECT_TRUE(std::ranges::all_of(seen, [](int n) { return n == 1; }));
+}
+
+TEST(StorageTest, ForEachPieceStopsWhenTheCallbackFails) {
+    const StoragePtr from = biwa::nx::MakeMemoryStorage(Counting(1 << 16));
+    const auto status = biwa::nx::ForEachPiece(
+        *from,
+        [](std::uint64_t offset, std::span<const std::byte>) -> biwa::Status {
+            if (offset == 4096) {
+                return biwa::Fail(Errc::kIo, "sink full");
+            }
+            return {};
+        },
+        {.threads = 2, .piece_size = 4096});
+    ASSERT_FALSE(status.has_value());
+    EXPECT_EQ(status.error().message(), "sink full");
 }
 
 TEST(StorageTest, CopyReportsTheFirstError) {
