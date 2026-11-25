@@ -9,8 +9,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
+#include "support/bucket_tree_builder.h"
 #include "support/pfs0_builder.h"
 
 namespace biwa::test {
@@ -62,30 +64,20 @@ inline CompressedSection BuildCompressedSection(const std::vector<std::byte>& pl
         entries.push_back(entry);
     }
 
-    const std::size_t table = (out.data.size() + 0x1FF) / 0x200 * 0x200;
-    out.data.resize(table + 0x8000);
-    PutU32(out.data, table + 0, 0);  // L1 node: index, set count, end offset, set start offsets
-    PutU32(out.data, table + 4, 1);
-    PutU64(out.data, table + 8, plain.size());
-    PutU64(out.data, table + 0x10, 0);
-    const std::size_t set = table + 0x4000;  // the entry set
-    PutU32(out.data, set + 0, 0);
-    PutU32(out.data, set + 4, static_cast<std::uint32_t>(entries.size()));
-    PutU64(out.data, set + 8, plain.size());
-    for (std::size_t i = 0; i < entries.size(); ++i) {
-        const std::size_t at = set + 0x10 + i * 0x18;
-        PutU64(out.data, at + 0x00, entries[i].virt);
-        PutU64(out.data, at + 0x08, entries[i].phys);
-        out.data[at + 0x10] = static_cast<std::byte>(entries[i].type);
-        PutU32(out.data, at + 0x14, entries[i].phys_size);
+    std::vector<std::vector<std::byte>> raw;
+    for (const Entry& entry : entries) {
+        std::vector<std::byte> bytes(0x18);
+        PutU64(bytes, 0x00, entry.virt);
+        PutU64(bytes, 0x08, entry.phys);
+        bytes[0x10] = static_cast<std::byte>(entry.type);
+        PutU32(bytes, 0x14, entry.phys_size);
+        raw.push_back(std::move(bytes));
     }
-
-    std::vector<std::byte> info(0x28);
-    PutU64(info, 0x00, table);
-    PutU64(info, 0x08, 0x8000);
-    PutU32(info, 0x10, 0x52544B42);  // "BKTR"
-    PutU32(info, 0x14, 1);
-    PutU32(info, 0x18, static_cast<std::uint32_t>(entries.size()));
+    const std::vector<std::byte> tree = BuildBucketTree(raw, 0x18, plain.size());
+    const std::size_t table = (out.data.size() + 0x1FF) / 0x200 * 0x200;
+    out.data.resize(table);
+    out.data.insert(out.data.end(), tree.begin(), tree.end());
+    const std::array<std::byte, 0x20> info = BucketTreeInfoBytes(table, tree.size(), entries.size());
     std::ranges::copy(info, out.compression_info.begin());
     return out;
 }

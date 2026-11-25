@@ -12,10 +12,6 @@
 
 namespace biwa::nx {
 
-// Bucket tree geometry used by compressed (and patch) sections.
-inline constexpr std::uint64_t kBucketNodeSize = 0x4000;
-inline constexpr std::uint32_t kBucketMagic = 0x52544B42;  // "BKTR"
-
 enum class CompressionType : std::uint8_t { kNone = 0, kZeros = 1, kLz4 = 3 };
 
 // The decompressed bytes of a compressed section. `stored` is the section's file system level
