@@ -6,6 +6,10 @@ The core is game-agnostic: what one game needs beyond it lives in a small per-ga
 
 Status: early. The design is written; the build skeleton and the `biwa` command (`version`, `help`) exist.
 
+## Download
+
+The [`dev` pre-release](https://github.com/ASR-Tanyi/Biwa/releases/tag/dev) always holds the latest build of `main` that passed CI: `biwa-dev-windows-x64.tar.zst` and `biwa-dev-linux-x64.tar.zst`, each with `biwa`, the test programs and the commit they were built from. Unpack with a `tar` that reads zstd (`tar --zstd -xf <file>`).
+
 ## Building
 
 | Host | Needs | Command |

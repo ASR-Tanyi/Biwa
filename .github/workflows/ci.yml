@@ -18,7 +18,10 @@ concurrency:
 
 env:
   LLVM_MINGW_VERSION: "20261117"
-  LLVM_MINGW_SHA256: e7a15a49a2ea95e9f3d8a9d0cfabe5052a4b10fb4777cc54de5a8c27b64bb701
+  LLVM_MINGW_LINUX_SHA256: e7a15a49a2ea95e9f3d8a9d0cfabe5052a4b10fb4777cc54de5a8c27b64bb701
+  LLVM_MINGW_WINDOWS_SHA256: 4d002e330a0f703625aa5ccbc37e96f8f824413e163bfc7336774aabd2c3a412
+  NINJA_VERSION: "1.13.2"
+  NINJA_WINDOWS_SHA256: 07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65
   LINT_LLVM_VERSION: "23.1.4"
 
 jobs:
@@ -28,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        preset: [linux-debug, linux-asan, linux-tsan]
+        preset: [linux-debug, linux-asan, linux-tsan, linux-release]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install tools
@@ -42,6 +45,41 @@ jobs:
         run: sudo sysctl vm.mmap_rnd_bits=28
       - name: Build and test
         run: cmake --workflow --preset ${{ matrix.preset }}
+      - name: Keep the binaries
+        if: matrix.preset == 'linux-release'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: linux-x64
+          path: build/linux-release/bin/
+          if-no-files-found: error
+
+  windows:
+    name: win-release
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install llvm-mingw ${{ env.LLVM_MINGW_VERSION }} and Ninja ${{ env.NINJA_VERSION }}
+        shell: bash
+        run: |
+          name=llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-x86_64
+          curl -sSfL -o "$RUNNER_TEMP/llvm-mingw.zip" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${name}.zip"
+          echo "${LLVM_MINGW_WINDOWS_SHA256}  $RUNNER_TEMP/llvm-mingw.zip" | sha256sum -c -
+          7z x -y -o"C:/tools" "$RUNNER_TEMP/llvm-mingw.zip" > /dev/null
+          curl -sSfL -o "$RUNNER_TEMP/ninja.zip" \
+            "https://github.com/ninja-build/ninja/releases/download/v${NINJA_VERSION}/ninja-win.zip"
+          echo "${NINJA_WINDOWS_SHA256}  $RUNNER_TEMP/ninja.zip" | sha256sum -c -
+          7z x -y -o"C:/tools/ninja" "$RUNNER_TEMP/ninja.zip" > /dev/null
+          echo "C:/tools/ninja" >> "$GITHUB_PATH"
+          echo "BIWA_LLVM_MINGW=C:/tools/${name}" >> "$GITHUB_ENV"
+      - name: Build and test
+        run: cmake --workflow --preset win-release
+      - name: Keep the binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: windows-x64
+          path: build/win-release/bin/
+          if-no-files-found: error
 
   cross:
     name: ${{ matrix.preset }}
@@ -49,22 +87,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        preset: [cross-debug, cross-release]
+        preset: [cross-debug]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install Ninja and Wine
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build wine64
-          sudo mkdir -p /run/user/$(id -u)
-          sudo chown $(id -u):$(id -g) /run/user/$(id -u)
-          chmod 700 /run/user/$(id -u)
+          run_dir="/run/user/$(id -u)"
+          sudo mkdir -p "${run_dir}"
+          sudo chown "$(id -u):$(id -g)" "${run_dir}"
+          chmod 700 "${run_dir}"
       - name: Install llvm-mingw ${{ env.LLVM_MINGW_VERSION }}
         run: |
           name=llvm-mingw-${LLVM_MINGW_VERSION}-ucrt-ubuntu-22.04-x86_64
           curl -sSfL -o /tmp/llvm-mingw.tar.xz \
-            https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${name}.tar.xz
-          echo "${LLVM_MINGW_SHA256}  /tmp/llvm-mingw.tar.xz" | sha256sum -c -
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VERSION}/${name}.tar.xz"
+          echo "${LLVM_MINGW_LINUX_SHA256}  /tmp/llvm-mingw.tar.xz" | sha256sum -c -
           sudo tar -C /opt -xf /tmp/llvm-mingw.tar.xz
           echo "BIWA_LLVM_MINGW=/opt/${name}" >> "$GITHUB_ENV"
       - name: Build and test under Wine
@@ -81,7 +120,41 @@ jobs:
           sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
           python3 -m venv /opt/lint
-          /opt/lint/bin/pip install clang-format==${LINT_LLVM_VERSION} clang-tidy==${LINT_LLVM_VERSION}
+          /opt/lint/bin/pip install "clang-format==${LINT_LLVM_VERSION}" "clang-tidy==${LINT_LLVM_VERSION}"
           echo /opt/lint/bin >> "$GITHUB_PATH"
       - name: Format check and clang-tidy
         run: cmake --workflow --preset lint
+
+  # Every push to main that passes everything replaces the `dev` pre-release with fresh
+  # Windows and Linux x64 builds.
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [linux, windows, cross, lint]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          path: dist
+      - name: Package
+        run: |
+          for os in windows linux; do
+            dir=biwa-dev-${os}-x64
+            mkdir -p "pkg/${dir}"
+            cp -r "dist/${os}-x64/." "pkg/${dir}/"
+            cp LICENSE README.md "pkg/${dir}/"
+            echo "${GITHUB_SHA}" > "pkg/${dir}/COMMIT"
+            if [ "${os}" = linux ]; then chmod +x "pkg/${dir}/biwa" "pkg/${dir}/"*_test; fi
+            tar -C pkg --zstd -cf "${dir}.tar.zst" "${dir}"
+          done
+          ls -l biwa-dev-*.tar.zst
+      - name: Publish the dev pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete dev --cleanup-tag --yes || true
+          gh release create dev biwa-dev-windows-x64.tar.zst biwa-dev-linux-x64.tar.zst \
+            --prerelease --target "${GITHUB_SHA}" --title "dev (${GITHUB_SHA::12})" \
+            --notes "Latest build of main at ${GITHUB_SHA}: biwa and the test programs, for Windows x64 (llvm-mingw, PDBs included) and Linux x64 (glibc, libc++ linked statically). Replaced on every push to main."

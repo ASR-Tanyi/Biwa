@@ -30,6 +30,7 @@ MSYS2 can be the shell on Windows (git, cmake, ninja from pacman), but the compi
 | `linux-debug` | Linux | Everything except the Win32 platform layer | Native |
 | `linux-asan` | Linux | Same, AddressSanitizer + UBSan | Native |
 | `linux-tsan` | Linux | Same, ThreadSanitizer | Native |
+| `linux-release` | Linux | Same, release with debug info, libc++ linked statically | Native |
 | `lint` | Both | clang-format check, clang-tidy with warnings as errors | — |
 
 - Linux builds use Clang with libc++ as well, so both hosts compile against the same C++ library (libstdc++ 13 with Clang 18 has no `std::expected`).
@@ -98,7 +99,12 @@ Generated module DLLs use none of these: they include only the C header that def
 ## CI
 
 - Commits stay small, one step each.
-- GitHub Actions (`.github/workflows/ci.yml`): `linux-debug`, `linux-asan`, `linux-tsan`, `cross-debug` and `cross-release` with tests under Wine, and `lint`. A native Windows job (llvm-mingw on a Windows runner) can be added when the runtime first runs there.
+- GitHub Actions (`.github/workflows/ci.yml`) on every push to `main` and every pull request:
+  - `linux-debug`, `linux-asan`, `linux-tsan`, `linux-release` on Ubuntu 24.04;
+  - `win-release` natively on a `windows-2025` runner (llvm-mingw and Ninja downloaded and checked by SHA-256);
+  - `cross-debug`: the Windows build made on Linux, tests under Wine;
+  - `lint`.
+- When every job passes on `main`, a last job replaces the **`dev` pre-release** with `biwa-dev-windows-x64.tar.zst` and `biwa-dev-linux-x64.tar.zst`: `biwa`, the test programs, PDBs on Windows, the licence and the commit. The Linux build links libc++ statically, so it needs only glibc.
 - Each preset has a workflow, so CI and a local check run the same command: `cmake --workflow --preset <name>`.
 
 ## Open questions

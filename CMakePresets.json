@@ -56,6 +56,15 @@
       }
     },
     {
+      "name": "linux-release",
+      "displayName": "Linux release with debug info (libc++ linked statically)",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_EXE_LINKER_FLAGS": "-stdlib=libc++ -static-libstdc++"
+      }
+    },
+    {
       "name": "mingw-base",
       "hidden": true,
       "inherits": "base",
@@ -137,6 +146,10 @@
       "configurePreset": "linux-tsan"
     },
     {
+      "name": "linux-release",
+      "configurePreset": "linux-release"
+    },
+    {
       "name": "win-debug",
       "configurePreset": "win-debug"
     },
@@ -189,6 +202,11 @@
       "name": "linux-tsan",
       "inherits": "base",
       "configurePreset": "linux-tsan"
+    },
+    {
+      "name": "linux-release",
+      "inherits": "base",
+      "configurePreset": "linux-release"
     },
     {
       "name": "wine",
@@ -268,6 +286,23 @@
         {
           "type": "test",
           "name": "linux-tsan"
+        }
+      ]
+    },
+    {
+      "name": "linux-release",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "linux-release"
+        },
+        {
+          "type": "build",
+          "name": "linux-release"
+        },
+        {
+          "type": "test",
+          "name": "linux-release"
         }
       ]
     },
