@@ -13,6 +13,7 @@
 #include "biwa/core/file.h"
 #include "biwa/core/hex.h"
 #include "biwa/core/version.h"
+#include "support/cli_runner.h"
 #include "support/nca_builder.h"
 #include "support/patch_builder.h"
 #include "support/pfs0_builder.h"
@@ -21,19 +22,9 @@
 
 namespace {
 
-struct Result {
-    int code;
-    std::string out;
-    std::string err;
-};
-
-Result RunBiwa(std::initializer_list<std::string_view> args) {
-    const std::vector<std::string_view> list(args);
-    std::ostringstream out;
-    std::ostringstream err;
-    const int code = biwa::cli::Run(list, out, err);
-    return {code, out.str(), err.str()};
-}
+using Result = biwa::test::RunResult;
+using biwa::test::PathText;
+using biwa::test::RunBiwa;
 
 TEST(CliTest, NoArgumentsPrintsUsage) {
     const Result r = RunBiwa({});
@@ -74,11 +65,6 @@ TEST(CliTest, ExtraArgumentIsAUsageError) {
     EXPECT_EQ(r.code, biwa::cli::kExitUsage);
     EXPECT_TRUE(r.out.empty());
     EXPECT_EQ(r.err, "biwa version: unexpected argument 'now'\nusage: biwa version\n");
-}
-
-std::string PathText(const std::filesystem::path& path) {
-    const std::u8string text = path.u8string();
-    return {text.begin(), text.end()};
 }
 
 TEST(CliInfoTest, ListsTheFilesOfAnNsp) {

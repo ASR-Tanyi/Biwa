@@ -24,6 +24,7 @@ int Report(std::string_view command, const Error& error, std::ostream& err);
 // Prints the problem and the command's usage line; returns the usage exit code.
 int UsageError(std::string_view command, std::string_view usage, std::string_view problem, std::ostream& err);
 
+int RunExtract(Args args, std::ostream& out, std::ostream& err);
 int RunInfo(Args args, std::ostream& out, std::ostream& err);
 int RunRomfs(Args args, std::ostream& out, std::ostream& err);
 

@@ -8,43 +8,13 @@
 #include <cstring>
 #include <vector>
 
-#include "support/pfs0_builder.h"
+#include "support/meta_builder.h"
 
 namespace {
 
 using biwa::Errc;
+using biwa::test::BuildNpdm;
 using biwa::test::PutU32;
-using biwa::test::PutU64;
-
-// META at 0, ACI0 at 0x80 (kernel capabilities at +0x40), ACID at 0x100.
-std::vector<std::byte> BuildNpdm(const std::vector<std::uint32_t>& caps) {
-    std::vector<std::byte> out(0x400);
-    std::memcpy(out.data(), "META", 4);
-    out[0x0C] = std::byte{0x07};  // 64-bit, address space type 3
-    out[0x0E] = std::byte{44};
-    out[0x0F] = std::byte{0};
-    PutU32(out, 0x14, 0x100000);
-    PutU32(out, 0x18, 3);
-    PutU32(out, 0x1C, 0x100000);
-    std::memcpy(out.data() + 0x20, "Application", 11);
-    PutU32(out, 0x70, 0x80);
-    PutU32(out, 0x74, static_cast<std::uint32_t>(0x40 + caps.size() * 4));
-    PutU32(out, 0x78, 0x100);
-    PutU32(out, 0x7C, 0x240);
-
-    std::memcpy(out.data() + 0x80, "ACI0", 4);
-    PutU64(out, 0x80 + 0x10, 0x0100000000002000);
-    PutU32(out, 0x80 + 0x30, 0x40);
-    PutU32(out, 0x80 + 0x34, static_cast<std::uint32_t>(caps.size() * 4));
-    for (std::size_t i = 0; i < caps.size(); ++i) {
-        PutU32(out, 0x80 + 0x40 + i * 4, caps[i]);
-    }
-
-    std::memcpy(out.data() + 0x100 + 0x200, "ACID", 4);
-    PutU64(out, 0x100 + 0x210, 0x0100000000002000);
-    PutU64(out, 0x100 + 0x218, 0x01000000000020FF);
-    return out;
-}
 
 // EnableSystemCalls for `group` with the given bits.
 std::uint32_t Svcs(std::uint32_t group, std::uint32_t bits) { return (group << 29) | (bits << 5) | 0xF; }

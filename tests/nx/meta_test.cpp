@@ -10,7 +10,7 @@
 
 #include "biwa/nx/cnmt.h"
 #include "biwa/nx/nacp.h"
-#include "support/pfs0_builder.h"
+#include "support/meta_builder.h"
 
 namespace {
 
@@ -19,24 +19,15 @@ using biwa::test::PutU32;
 using biwa::test::PutU64;
 
 std::vector<std::byte> BuildCnmt(std::uint8_t type, std::size_t contents) {
-    std::vector<std::byte> out(0x20 + 0x10 + contents * 0x38 + 0x20);
-    PutU64(out, 0x00, 0x0100000000003000);
-    PutU32(out, 0x08, 0x30000);
-    out[0x0C] = static_cast<std::byte>(type);
-    out[0x0E] = std::byte{0x10};
-    out[0x10] = static_cast<std::byte>(contents);
-    PutU64(out, 0x20, 0x0100000000003800);
-    PutU32(out, 0x28, 0x0C000000);
-    PutU32(out, 0x2C, 0x10000);
+    std::vector<biwa::test::CnmtBuildContent> records;
     for (std::size_t i = 0; i < contents; ++i) {
-        const std::size_t at = 0x30 + i * 0x38;
-        out[at] = std::byte{0xAA};                                // hash
-        out[at + 0x20] = static_cast<std::byte>(0x10 + i);        // id
-        PutU32(out, at + 0x30, 0x12345678);                       // size, low part
-        out[at + 0x34] = std::byte{0x01};                         // size, bits 32..39
-        out[at + 0x36] = static_cast<std::byte>(i == 0 ? 1 : 3);  // program, control
+        biwa::test::CnmtBuildContent record;
+        record.id[0] = static_cast<std::uint8_t>(0x10 + i);
+        record.size = 0x112345678;
+        record.type = i == 0 ? 1 : 3;  // program, control
+        records.push_back(record);
     }
-    return out;
+    return biwa::test::BuildCnmt(0x0100000000003000, 0x30000, type, 0x0100000000003800, records);
 }
 
 TEST(CnmtTest, ReadsAnApplication) {

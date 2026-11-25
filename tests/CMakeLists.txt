@@ -20,7 +20,8 @@ biwa_add_test(core_test
     DEPS core)
 target_compile_definitions(core_test PRIVATE BIWA_TEST_PROJECT_VERSION="${PROJECT_VERSION}")
 
-biwa_add_test(cli_test SOURCES cli/run_test.cpp DEPS cli)
+biwa_add_test(cli_test SOURCES cli/extract_test.cpp cli/run_test.cpp DEPS cli)
+target_link_libraries(cli_test PRIVATE LZ4::lz4)  # the builders compress test data
 
 biwa_add_test(nx_test
     SOURCES nx/bucket_tree_test.cpp nx/compressed_test.cpp nx/content_test.cpp nx/crypto_test.cpp
