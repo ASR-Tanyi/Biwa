@@ -17,7 +17,8 @@ TicketMap ReadTickets(const Pfs0& package, const TicketErrorFn& on_error) {
             continue;
         }
         const Result<StoragePtr> storage = package.OpenEntry(entry);
-        const Result<Ticket> ticket = storage ? ReadTicket(**storage) : Result<Ticket>(std::unexpected(storage.error()));
+        const Result<Ticket> ticket =
+            storage ? ReadTicket(**storage) : Result<Ticket>(std::unexpected(storage.error()));
         if (!ticket) {
             on_error(entry.name, ticket.error());
             continue;

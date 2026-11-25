@@ -25,8 +25,8 @@ T Load(const std::vector<std::byte>& bytes, std::size_t at) {
 }
 
 Status CheckName(std::string_view name, std::string_view kind, std::uint32_t offset) {
-    const bool bad = name.empty() || name == "." || name == ".." || name.find_first_of(std::string_view("/\\\0", 3)) !=
-                                                                         std::string_view::npos;
+    const bool bad = name.empty() || name == "." || name == ".." ||
+                     name.find_first_of(std::string_view("/\\\0", 3)) != std::string_view::npos;
     if (bad) {
         return Failf(Errc::kCorrupt, "RomFS: {} entry {:#x} has an invalid name", kind, offset);
     }
@@ -67,10 +67,10 @@ Result<Romfs> Romfs::Open(StoragePtr storage) {
     if (header[0] != kHeaderSize) {
         return Failf(Errc::kCorrupt, "RomFS: header size is {:#x}, not {:#x}", header[0], kHeaderSize);
     }
-    auto table = [&](std::uint64_t offset, std::uint64_t size, std::string_view what) -> Result<std::vector<std::byte>> {
+    auto table = [&](std::uint64_t offset, std::uint64_t size,
+                     std::string_view what) -> Result<std::vector<std::byte>> {
         if (size > kMaxTableSize || !RangeFits(offset, size, storage->Size())) {
-            return Failf(Errc::kCorrupt, "RomFS: the {} table ({:#x} bytes at {:#x}) does not fit", what, size,
-                         offset);
+            return Failf(Errc::kCorrupt, "RomFS: the {} table ({:#x} bytes at {:#x}) does not fit", what, size, offset);
         }
         std::vector<std::byte> bytes(static_cast<std::size_t>(size));
         BIWA_RETURN_IF_ERROR(storage->Read(offset, bytes));
@@ -233,8 +233,8 @@ Result<StoragePtr> Romfs::OpenFile(std::string_view path) const {
         return std::unexpected(file.error());
     }
     if (!RangeFits(file->offset, file->size, storage_->Size() - data_offset_)) {
-        return Failf(Errc::kCorrupt, "RomFS: the data of {} ({:#x} bytes at {:#x}) is past the end", path,
-                     file->size, file->offset);
+        return Failf(Errc::kCorrupt, "RomFS: the data of {} ({:#x} bytes at {:#x}) is past the end", path, file->size,
+                     file->offset);
     }
     return MakeSubStorage(storage_, data_offset_ + file->offset, file->size, path);
 }

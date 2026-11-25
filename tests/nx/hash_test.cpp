@@ -84,11 +84,11 @@ TEST(HashTest, RejectsBadBlockSizesAndShortTables) {
               Errc::kCorrupt);
     EXPECT_EQ(biwa::nx::MakeHashCheckedStorage(two_hashes, data, 0, HashPadding::kNone, "x").error().code(),
               Errc::kCorrupt);
-    EXPECT_EQ(biwa::nx::MakeHashCheckedStorage(two_hashes, data, biwa::nx::kMaxHashBlockSize * 2, HashPadding::kNone,
-                                               "x")
-                  .error()
-                  .code(),
-              Errc::kCorrupt);
+    EXPECT_EQ(
+        biwa::nx::MakeHashCheckedStorage(two_hashes, data, biwa::nx::kMaxHashBlockSize * 2, HashPadding::kNone, "x")
+            .error()
+            .code(),
+        Errc::kCorrupt);
     EXPECT_TRUE(biwa::nx::MakeHashCheckedStorage(two_hashes, data, 0x180, HashPadding::kNone, "x").has_value());
 }
 

@@ -193,7 +193,8 @@ TEST(CliInfoTest, VerifyChecksEveryHash) {
     MakeTestNsp(bad, true, true);
     r = RunBiwa({"info", "-k", bad.keys, "--verify", bad.nsp});
     EXPECT_EQ(r.code, biwa::cli::kExitDamaged) << r.out;
-    const std::string error = "      error: corrupt: section 0 data: block 0 (bytes 0x0 to 0x68) does not match its hash\n";
+    const std::string error =
+        "      error: corrupt: section 0 data: block 0 (bytes 0x0 to 0x68) does not match its hash\n";
     EXPECT_NE(r.out.find(error), std::string::npos) << r.out;
     EXPECT_EQ(r.out.find(error), r.out.rfind(error)) << "reported once\n" << r.out;
 

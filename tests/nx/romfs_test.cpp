@@ -117,9 +117,7 @@ TEST(RomfsTest, RejectsUnsafeNames) {
         std::memcpy(bytes.data() + name, bad.data(), bad.size());
         const Romfs romfs = Open(bytes);
         EXPECT_EQ(romfs.List("/").error().code(), Errc::kCorrupt) << bad;
-        EXPECT_EQ(romfs.ForEachFile([](std::string_view, std::uint64_t) -> biwa::Status { return {}; })
-                      .error()
-                      .code(),
+        EXPECT_EQ(romfs.ForEachFile([](std::string_view, std::uint64_t) -> biwa::Status { return {}; }).error().code(),
                   Errc::kCorrupt)
             << bad;
     }

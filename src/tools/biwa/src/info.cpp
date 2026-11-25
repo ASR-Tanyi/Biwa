@@ -62,8 +62,8 @@ Status ReadThrough(const nx::Storage& data) {
     return nx::ForEachPiece(data, [](std::uint64_t, std::span<const std::byte>) -> Status { return {}; });
 }
 
-void DescribeNca(const nx::Pfs0& nsp, const nx::Pfs0Entry& entry, const nx::KeySet& keys,
-                 const nx::TicketMap& tickets, bool verify, std::ostream& out, FirstError& first) {
+void DescribeNca(const nx::Pfs0& nsp, const nx::Pfs0Entry& entry, const nx::KeySet& keys, const nx::TicketMap& tickets,
+                 bool verify, std::ostream& out, FirstError& first) {
     auto fail = [&](const Error& error, std::string_view indent) {
         out << indent << "error: " << error << '\n';
         first.Note(error);

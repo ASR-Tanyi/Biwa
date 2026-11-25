@@ -86,8 +86,8 @@ inline std::vector<std::byte> BuildRomfs(const std::vector<RomfsBuildFile>& file
     const std::size_t file_hash = dir_table + dir_size;
     const std::size_t file_table = file_hash + 4;
     std::vector<std::byte> out(file_table + file_size);
-    const std::uint64_t header[10] = {0x50, dir_hash, 4, dir_table, dir_size, file_hash, 4, file_table, file_size,
-                                      data_start};
+    const std::uint64_t header[10] = {0x50,      dir_hash, 4,          dir_table, dir_size,
+                                      file_hash, 4,        file_table, file_size, data_start};
     std::memcpy(out.data(), header, sizeof(header));
     PutU32(out, dir_hash, kNone);
     PutU32(out, file_hash, kNone);

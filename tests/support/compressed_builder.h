@@ -38,11 +38,13 @@ inline CompressedSection BuildCompressedSection(const std::vector<std::byte>& pl
         out.data.resize((out.data.size() + 15) / 16 * 16);
         Entry entry{at, out.data.size(), 0, static_cast<std::uint32_t>(size)};
         if (std::all_of(plain.begin() + static_cast<std::ptrdiff_t>(at),
-                        plain.begin() + static_cast<std::ptrdiff_t>(at + size), [](std::byte b) { return b == std::byte{0}; })) {
+                        plain.begin() + static_cast<std::ptrdiff_t>(at + size),
+                        [](std::byte b) { return b == std::byte{0}; })) {
             entry = {at, 0, 1, 0};
         } else {
             std::vector<char> packed(static_cast<std::size_t>(LZ4_compressBound(static_cast<int>(size))));
-            const int n = LZ4_compress_default(source, packed.data(), static_cast<int>(size), static_cast<int>(packed.size()));
+            const int n =
+                LZ4_compress_default(source, packed.data(), static_cast<int>(size), static_cast<int>(packed.size()));
             if (n > 0 && static_cast<std::size_t>(n) < size) {
                 entry.type = 3;
                 entry.phys_size = static_cast<std::uint32_t>(n);

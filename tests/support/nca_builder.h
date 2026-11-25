@@ -134,8 +134,9 @@ inline std::vector<std::byte> BuildNca(const NcaBuildOptions& options, const std
 inline std::vector<std::byte> HashBlocks(std::span<const std::byte> data, std::size_t block_size, bool pad) {
     std::vector<std::byte> out;
     for (std::size_t at = 0; at < data.size(); at += block_size) {
-        std::vector<std::byte> block(data.begin() + static_cast<std::ptrdiff_t>(at),
-                                     data.begin() + static_cast<std::ptrdiff_t>(std::min(data.size(), at + block_size)));
+        std::vector<std::byte> block(
+            data.begin() + static_cast<std::ptrdiff_t>(at),
+            data.begin() + static_cast<std::ptrdiff_t>(std::min(data.size(), at + block_size)));
         if (pad) {
             block.resize(block_size);
         }

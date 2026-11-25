@@ -54,8 +54,9 @@ TEST(CompressedTest, ReadsMatchThePlainBytes) {
     const StoragePtr storage = Open(section);
     ASSERT_NE(storage, nullptr);
     EXPECT_EQ(storage->Size(), plain.size());
-    for (const auto& [offset, size] : std::vector<std::pair<std::size_t, std::size_t>>{
-             {0, plain.size()}, {0, 0x1000}, {0x1000, 0x1000}, {0x10, 1}, {0xFFF, 2}, {0x1F00, 0x2200}, {0x4100, 0x134}}) {
+    const std::vector<std::pair<std::size_t, std::size_t>> ranges = {
+        {0, plain.size()}, {0, 0x1000}, {0x1000, 0x1000}, {0x10, 1}, {0xFFF, 2}, {0x1F00, 0x2200}, {0x4100, 0x134}};
+    for (const auto& [offset, size] : ranges) {
         std::vector<std::byte> out(size);
         ASSERT_TRUE(storage->Read(offset, out).has_value()) << offset;
         EXPECT_TRUE(std::equal(out.begin(), out.end(), plain.begin() + static_cast<std::ptrdiff_t>(offset))) << offset;

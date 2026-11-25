@@ -33,7 +33,8 @@ KeySet Keys() {
 biwa::nx::Pfs0 Package(bool with_ticket) {
     std::vector<biwa::test::BuildFile> files = {{"broken.tik", Bytes("not a ticket")}};
     if (with_ticket) {
-        files.push_back({"good.tik", biwa::test::BuildTicket(kRightsId, biwa::test::TestKey(5), biwa::test::TestKey(9))});
+        files.push_back(
+            {"good.tik", biwa::test::BuildTicket(kRightsId, biwa::test::TestKey(5), biwa::test::TestKey(9))});
     }
     auto pfs = biwa::nx::Pfs0::Open(biwa::nx::MakeMemoryStorage(biwa::test::BuildPfs0(files)));
     EXPECT_TRUE(pfs.has_value());
@@ -42,8 +43,8 @@ biwa::nx::Pfs0 Package(bool with_ticket) {
 
 TEST(ContentTest, ReadsTicketsAndReportsBadOnes) {
     std::vector<std::string> bad;
-    const biwa::nx::TicketMap tickets =
-        biwa::nx::ReadTickets(Package(true), [&](std::string_view name, const biwa::Error&) { bad.emplace_back(name); });
+    const biwa::nx::TicketMap tickets = biwa::nx::ReadTickets(
+        Package(true), [&](std::string_view name, const biwa::Error&) { bad.emplace_back(name); });
     EXPECT_EQ(bad, std::vector<std::string>{"broken.tik"});
     ASSERT_EQ(tickets.size(), 1u);
     EXPECT_TRUE(tickets.contains(biwa::ToHex(kRightsId)));

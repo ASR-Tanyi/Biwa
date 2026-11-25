@@ -4,6 +4,8 @@
 // `biwa romfs ls|cat`: look inside a RomFS, either a RomFS image or the RomFS of an NSP's program
 // (or add-on data) NCA.
 
+#include "biwa/nx/romfs.h"
+
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -19,7 +21,6 @@
 #include "biwa/nx/keys.h"
 #include "biwa/nx/nca.h"
 #include "biwa/nx/pfs0.h"
-#include "biwa/nx/romfs.h"
 #include "biwa/nx/storage.h"
 #include "commands.h"
 
@@ -45,8 +46,8 @@ Result<nx::Romfs> OpenPackageRomfs(const nx::StoragePtr& storage, const nx::KeyS
             continue;
         }
         Result<nx::StoragePtr> nca = package->OpenEntry(entry);
-        Result<nx::NcaHeader> header = nca ? nx::ReadNcaHeader(**nca, keys)
-                                           : Result<nx::NcaHeader>(std::unexpected(nca.error()));
+        Result<nx::NcaHeader> header =
+            nca ? nx::ReadNcaHeader(**nca, keys) : Result<nx::NcaHeader>(std::unexpected(nca.error()));
         if (!header) {
             if (!first_error) {
                 first_error = std::move(header).error().WithContext(entry.name);
@@ -160,8 +161,8 @@ int RunCat(const nx::Romfs& romfs, std::string_view path, const std::optional<st
     std::vector<std::byte> buffer(std::size_t{1} << 20);
     const std::uint64_t size = (*file)->Size();
     for (std::uint64_t offset = 0; offset < size;) {
-        const std::span<std::byte> piece(buffer.data(),
-                                         static_cast<std::size_t>(std::min<std::uint64_t>(buffer.size(), size - offset)));
+        const std::span<std::byte> piece(
+            buffer.data(), static_cast<std::size_t>(std::min<std::uint64_t>(buffer.size(), size - offset)));
         const Status read = (*file)->Read(offset, piece);
         if (!read) {
             return Report("romfs", read.error(), err);
@@ -203,8 +204,8 @@ int RunRomfs(Args args, std::ostream& out, std::ostream& err) {
         }
     }
     if (positional.empty() || positional.size() > 2 || (!ls && positional.size() != 2)) {
-        return UsageError("romfs", kUsage, ls ? "a file and at most one path are needed" : "a file and a path are needed",
-                          err);
+        return UsageError("romfs", kUsage,
+                          ls ? "a file and at most one path are needed" : "a file and a path are needed", err);
     }
 
     std::optional<nx::KeySet> keys;
