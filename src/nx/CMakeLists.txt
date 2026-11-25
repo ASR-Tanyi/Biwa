@@ -8,6 +8,7 @@ biwa_add_module(nx LAYER 1
         src/keys.cpp
         src/nca.cpp
         src/pfs0.cpp
+        src/section.cpp
         src/storage.cpp
         src/ticket.cpp
     DEPS core)

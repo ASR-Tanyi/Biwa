@@ -43,6 +43,9 @@ struct NcaBuildSection {
     nx::NcaEncryption encryption = nx::NcaEncryption::kNone;
     std::uint64_t counter_upper = 0;
     std::array<std::byte, 0xF8> hash_data{};
+    std::array<std::byte, 0x40> patch_info{};
+    std::array<std::byte, 0x30> sparse_info{};
+    std::array<std::byte, 0x28> compression_info{};
     std::vector<std::byte> data;  // the section's plaintext, padded to 0x200 by the builder
 };
 
@@ -103,7 +106,10 @@ inline std::vector<std::byte> BuildNca(const NcaBuildOptions& options, const std
         header[fs + 3] = static_cast<std::byte>(section.hash_type);
         header[fs + 4] = static_cast<std::byte>(section.encryption);
         std::memcpy(header.data() + fs + 0x8, section.hash_data.data(), section.hash_data.size());
+        std::memcpy(header.data() + fs + 0x100, section.patch_info.data(), section.patch_info.size());
         PutU64(header, fs + 0x140, section.counter_upper);
+        std::memcpy(header.data() + fs + 0x148, section.sparse_info.data(), section.sparse_info.size());
+        std::memcpy(header.data() + fs + 0x178, section.compression_info.data(), section.compression_info.size());
         const Sha256Digest hash = Sha256Of(std::span(header).subspan(fs, 0x200));
         std::memcpy(header.data() + 0x280 + i * 0x20, hash.data(), hash.size());
 
@@ -119,6 +125,20 @@ inline std::vector<std::byte> BuildNca(const NcaBuildOptions& options, const std
         return {};
     }
     std::memcpy(out.data(), header.data(), header.size());
+    return out;
+}
+
+// HierarchicalSha256 hash data with a hash table at 0 and the data layer at `data_offset`.
+inline std::array<std::byte, 0xF8> Sha256HashData(std::uint64_t data_offset, std::uint64_t data_size) {
+    std::vector<std::byte> bytes(0xF8);
+    PutU32(bytes, 0x20, 0x1000);  // block size
+    PutU32(bytes, 0x24, 2);       // layers
+    PutU64(bytes, 0x28, 0);
+    PutU64(bytes, 0x30, 0x20);
+    PutU64(bytes, 0x38, data_offset);
+    PutU64(bytes, 0x40, data_size);
+    std::array<std::byte, 0xF8> out{};
+    std::ranges::copy(bytes, out.begin());
     return out;
 }
 
