@@ -23,8 +23,9 @@ target_compile_definitions(core_test PRIVATE BIWA_TEST_PROJECT_VERSION="${PROJEC
 biwa_add_test(cli_test SOURCES cli/run_test.cpp DEPS cli)
 
 biwa_add_test(nx_test
-    SOURCES nx/bucket_tree_test.cpp nx/compressed_test.cpp nx/content_test.cpp nx/crypto_test.cpp nx/hash_test.cpp nx/keys_test.cpp
-            nx/nca_test.cpp nx/nso_test.cpp nx/patch_test.cpp nx/pfs0_test.cpp nx/romfs_test.cpp nx/section_test.cpp nx/storage_test.cpp
-            nx/ticket_test.cpp
+    SOURCES nx/bucket_tree_test.cpp nx/compressed_test.cpp nx/content_test.cpp nx/crypto_test.cpp
+            nx/hash_test.cpp nx/keys_test.cpp nx/nca_test.cpp nx/npdm_test.cpp
+            nx/nso_test.cpp nx/patch_test.cpp nx/pfs0_test.cpp nx/romfs_test.cpp nx/section_test.cpp
+            nx/storage_test.cpp nx/ticket_test.cpp
     DEPS nx)
 target_link_libraries(nx_test PRIVATE LZ4::lz4)  # the builders compress test data
