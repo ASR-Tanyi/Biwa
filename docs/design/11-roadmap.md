@@ -31,7 +31,7 @@ Every step below is one small commit with its own test, small enough to check qu
 
 1. Decoder table from `a64.inc`; the 2^32 encoding test against Capstone.
 2. Unicorn test harness (random states, comparison).
-3. Semantics, one group per step: integer arithmetic and logic → loads and stores → branches and system → exclusives and barriers → FP scalar → AdvSIMD (several steps) → crypto and CRC.
+3. Semantics, one group per step: integer arithmetic and logic (with CRC32) → loads and stores → branches and system → exclusives and barriers → FP scalar → AdvSIMD (several steps) → crypto.
 4. Interpreter over the semantics.
 
 ## P3 — Lifter ([04](04-cpu-recompiler.md))

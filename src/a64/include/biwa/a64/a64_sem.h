@@ -205,6 +205,315 @@ static inline void sem_extr(BiwaCpu* cpu, bool sf, unsigned d, unsigned n, unsig
     sem_set_x(cpu, d, sem_width(sf, result));
 }
 
+/* ---- Data processing: register ---- */
+
+/* The condition codes of B.cond, CSEL, CCMP, ...: EQ NE CS CC MI PL VS VC HI LS GE LT GT LE AL NV. */
+static inline bool sem_condition_holds(uint32_t nzcv, unsigned cond) {
+    const bool n = (nzcv & SEM_FLAG_N) != 0;
+    const bool z = (nzcv & SEM_FLAG_Z) != 0;
+    const bool c = (nzcv & SEM_FLAG_C) != 0;
+    const bool v = (nzcv & SEM_FLAG_V) != 0;
+    bool result = false;
+    switch (cond >> 1) {
+        case 0:
+            result = z;
+            break;
+        case 1:
+            result = c;
+            break;
+        case 2:
+            result = n;
+            break;
+        case 3:
+            result = v;
+            break;
+        case 4:
+            result = c && !z;
+            break;
+        case 5:
+            result = n == v;
+            break;
+        case 6:
+            result = n == v && !z;
+            break;
+        default:
+            return true; /* AL and NV */
+    }
+    return (cond & 1) != 0 ? !result : result;
+}
+
+/* LSL (0), LSR (1), ASR (2), ROR (3) by `amount` (below the width). */
+static inline uint64_t sem_shift(bool sf, uint64_t value, unsigned type, unsigned amount) {
+    const unsigned width = sf ? 64 : 32;
+    value = sem_width(sf, value);
+    if (amount == 0) {
+        return value;
+    }
+    switch (type) {
+        case 0:
+            return sem_width(sf, value << amount);
+        case 1:
+            return value >> amount;
+        case 2:
+            if (sf) {
+                return (uint64_t)((int64_t)value >> amount);
+            }
+            return (uint64_t)(uint32_t)((int32_t)(uint32_t)value >> amount);
+        default:
+            return sem_ror(value, amount, width);
+    }
+}
+
+/* AND, ORR, EOR, ANDS (opc 0..3) with a shifted register; `invert` gives BIC, ORN, EON, BICS. */
+static inline void sem_logical_shift(BiwaCpu* cpu, bool sf, unsigned opc, bool invert, unsigned d, unsigned n,
+                                     unsigned m, unsigned type, unsigned amount) {
+    uint64_t operand = sem_shift(sf, sem_x(cpu, m), type, amount);
+    if (invert) {
+        operand = ~operand;
+    }
+    const uint64_t a = sem_x(cpu, n);
+    uint64_t result = 0;
+    switch (opc) {
+        case 0:
+        case 3:
+            result = a & operand;
+            break;
+        case 1:
+            result = a | operand;
+            break;
+        default:
+            result = a ^ operand;
+            break;
+    }
+    result = sem_width(sf, result);
+    if (opc == 3) {
+        cpu->nzcv = sem_nz(sf, result);
+    }
+    sem_set_x(cpu, d, result);
+}
+
+/* ADD, ADDS, SUB, SUBS (shifted register: LSL, LSR or ASR). */
+static inline void sem_addsub_shift(BiwaCpu* cpu, bool sf, bool sub, bool setflags, unsigned d, unsigned n, unsigned m,
+                                    unsigned type, unsigned amount) {
+    const uint64_t operand = sem_shift(sf, sem_x(cpu, m), type, amount);
+    uint32_t nzcv = 0;
+    const uint64_t result = sem_add_with_carry(sem_x(cpu, n), sub ? ~operand : operand, sub ? 1u : 0u, sf, &nzcv);
+    if (setflags) {
+        cpu->nzcv = nzcv;
+    }
+    sem_set_x(cpu, d, result);
+}
+
+/* Rm extended by `option` (UXTB, UXTH, UXTW, UXTX, SXTB, SXTH, SXTW, SXTX) and shifted left by
+   `shift` (0..4). */
+static inline uint64_t sem_extend(uint64_t value, unsigned option, unsigned shift) {
+    switch (option) {
+        case 0:
+            value = (uint8_t)value;
+            break;
+        case 1:
+            value = (uint16_t)value;
+            break;
+        case 2:
+            value = (uint32_t)value;
+            break;
+        case 4:
+            value = (uint64_t)(int64_t)(int8_t)(uint8_t)value;
+            break;
+        case 5:
+            value = (uint64_t)(int64_t)(int16_t)(uint16_t)value;
+            break;
+        case 6:
+            value = (uint64_t)(int64_t)(int32_t)(uint32_t)value;
+            break;
+        default:
+            break;
+    }
+    return value << shift;
+}
+
+/* ADD, ADDS, SUB, SUBS (extended register). Rn is SP for 31; Rd too unless flags are set. */
+static inline void sem_addsub_ext(BiwaCpu* cpu, bool sf, bool sub, bool setflags, unsigned d, unsigned n, unsigned m,
+                                  unsigned option, unsigned shift) {
+    const uint64_t operand = sem_extend(sem_x(cpu, m), option, shift);
+    uint32_t nzcv = 0;
+    const uint64_t result = sem_add_with_carry(sem_xsp(cpu, n), sub ? ~operand : operand, sub ? 1u : 0u, sf, &nzcv);
+    if (setflags) {
+        cpu->nzcv = nzcv;
+        sem_set_x(cpu, d, result);
+    } else {
+        sem_set_xsp(cpu, d, result);
+    }
+}
+
+/* ADC, ADCS, SBC, SBCS. */
+static inline void sem_adc(BiwaCpu* cpu, bool sf, bool sub, bool setflags, unsigned d, unsigned n, unsigned m) {
+    const uint64_t operand = sem_x(cpu, m);
+    uint32_t nzcv = 0;
+    const unsigned carry = (cpu->nzcv & SEM_FLAG_C) != 0 ? 1u : 0u;
+    const uint64_t result = sem_add_with_carry(sem_x(cpu, n), sub ? ~operand : operand, carry, sf, &nzcv);
+    if (setflags) {
+        cpu->nzcv = nzcv;
+    }
+    sem_set_x(cpu, d, result);
+}
+
+/* CCMN (sub false) and CCMP (sub true) with `operand` (a register's value or a 5-bit immediate):
+   the flags of Rn + / - operand if `cond` holds, otherwise `flags` (nzcv in bits 3..0). */
+static inline void sem_ccmp(BiwaCpu* cpu, bool sf, bool sub, unsigned n, uint64_t operand, unsigned cond,
+                            unsigned flags) {
+    if (sem_condition_holds(cpu->nzcv, cond)) {
+        uint32_t nzcv = 0;
+        (void)sem_add_with_carry(sem_x(cpu, n), sub ? ~operand : operand, sub ? 1u : 0u, sf, &nzcv);
+        cpu->nzcv = nzcv;
+    } else {
+        cpu->nzcv = (uint32_t)flags << 28;
+    }
+}
+
+/* CSEL (op 0), CSINC (1), CSINV (2), CSNEG (3). */
+static inline void sem_csel(BiwaCpu* cpu, bool sf, unsigned op, unsigned d, unsigned n, unsigned m, unsigned cond) {
+    uint64_t result = sem_x(cpu, n);
+    if (!sem_condition_holds(cpu->nzcv, cond)) {
+        result = sem_x(cpu, m);
+        switch (op) {
+            case 1:
+                result += 1;
+                break;
+            case 2:
+                result = ~result;
+                break;
+            case 3:
+                result = 0 - result;
+                break;
+            default:
+                break;
+        }
+    }
+    sem_set_x(cpu, d, sem_width(sf, result));
+}
+
+/* CRC32B/H/W/X (castagnoli false) and CRC32CB/H/W/X: Wn updated with the low `bytes` of Rm,
+   bit-reflected, without the initial and final inversions. */
+static inline void sem_crc32(BiwaCpu* cpu, bool castagnoli, unsigned bytes, unsigned d, unsigned n, unsigned m) {
+    const uint32_t poly = castagnoli ? 0x82F63B78u : 0xEDB88320u;
+    uint32_t crc = (uint32_t)sem_x(cpu, n);
+    const uint64_t value = sem_x(cpu, m);
+    for (unsigned i = 0; i < 8 * bytes; ++i) {
+        const uint32_t bit = (crc ^ (uint32_t)(value >> i)) & 1;
+        crc = (crc >> 1) ^ (bit != 0 ? poly : 0);
+    }
+    sem_set_x(cpu, d, crc);
+}
+
+/* RBIT. */
+static inline void sem_rbit(BiwaCpu* cpu, bool sf, unsigned d, unsigned n) {
+    uint64_t value = sem_x(cpu, n);
+    uint64_t result = 0;
+    const unsigned width = sf ? 64 : 32;
+    for (unsigned i = 0; i < width; ++i) {
+        result = (result << 1) | ((value >> i) & 1);
+    }
+    sem_set_x(cpu, d, result);
+}
+
+/* REV16 (container 2 bytes), REV32 (4) and REV (the whole register): bytes reversed in each
+   container. */
+static inline void sem_rev(BiwaCpu* cpu, bool sf, unsigned container, unsigned d, unsigned n) {
+    const uint64_t value = sem_x(cpu, n);
+    const unsigned bytes = sf ? 8 : 4;
+    uint64_t result = 0;
+    for (unsigned base = 0; base < bytes; base += container) {
+        for (unsigned i = 0; i < container; ++i) {
+            const uint64_t byte = (value >> (8 * (base + i))) & 0xFF;
+            result |= byte << (8 * (base + container - 1 - i));
+        }
+    }
+    sem_set_x(cpu, d, result);
+}
+
+/* CLZ and CLS (count leading sign bits). */
+static inline void sem_clz(BiwaCpu* cpu, bool sf, bool cls, unsigned d, unsigned n) {
+    uint64_t value = sem_width(sf, sem_x(cpu, n));
+    const unsigned width = sf ? 64 : 32;
+    if (cls) {
+        /* The bits after the sign bit that equal it: CLZ of value ^ (value >> 1), less one. */
+        value = sem_width(sf, value ^ (value >> 1)) & (sf ? ~(uint64_t)0 >> 1 : 0x7FFFFFFFu);
+    }
+    unsigned count = width;
+    if (value != 0) {
+        count = (unsigned)__builtin_clzll(value) - (64 - width);
+    }
+    sem_set_x(cpu, d, cls ? count - 1 : count);
+}
+
+/* UDIV and SDIV: division by zero gives 0; the signed overflow case wraps. */
+static inline void sem_div(BiwaCpu* cpu, bool sf, bool is_signed, unsigned d, unsigned n, unsigned m) {
+    uint64_t result = 0;
+    if (sf) {
+        const uint64_t a = sem_x(cpu, n);
+        const uint64_t b = sem_x(cpu, m);
+        if (b == 0) {
+            result = 0;
+        } else if (!is_signed) {
+            result = a / b;
+        } else if (a == (uint64_t)1 << 63 && b == ~(uint64_t)0) {
+            result = a;
+        } else {
+            result = (uint64_t)((int64_t)a / (int64_t)b);
+        }
+    } else {
+        const uint32_t a = (uint32_t)sem_x(cpu, n);
+        const uint32_t b = (uint32_t)sem_x(cpu, m);
+        if (b == 0) {
+            result = 0;
+        } else if (!is_signed) {
+            result = a / b;
+        } else if (a == 0x80000000u && b == 0xFFFFFFFFu) {
+            result = a;
+        } else {
+            result = (uint32_t)((int32_t)a / (int32_t)b);
+        }
+    }
+    sem_set_x(cpu, d, result);
+}
+
+/* LSLV, LSRV, ASRV, RORV (type 0..3): shift by Rm modulo the width. */
+static inline void sem_shiftv(BiwaCpu* cpu, bool sf, unsigned type, unsigned d, unsigned n, unsigned m) {
+    const unsigned amount = (unsigned)(sem_x(cpu, m) & (sf ? 63u : 31u));
+    sem_set_x(cpu, d, sem_shift(sf, sem_x(cpu, n), type, amount));
+}
+
+/* MADD and MSUB: Ra + / - Rn * Rm. */
+static inline void sem_madd(BiwaCpu* cpu, bool sf, bool sub, unsigned d, unsigned n, unsigned m, unsigned a) {
+    const uint64_t product = sem_x(cpu, n) * sem_x(cpu, m);
+    sem_set_x(cpu, d, sem_width(sf, sub ? sem_x(cpu, a) - product : sem_x(cpu, a) + product));
+}
+
+/* SMADDL, SMSUBL, UMADDL, UMSUBL: Xa + / - Wn * Wm, the product 64-bit. */
+static inline void sem_maddl(BiwaCpu* cpu, bool is_signed, bool sub, unsigned d, unsigned n, unsigned m, unsigned a) {
+    uint64_t product = 0;
+    if (is_signed) {
+        product = (uint64_t)((int64_t)(int32_t)(uint32_t)sem_x(cpu, n) * (int64_t)(int32_t)(uint32_t)sem_x(cpu, m));
+    } else {
+        product = (uint64_t)(uint32_t)sem_x(cpu, n) * (uint64_t)(uint32_t)sem_x(cpu, m);
+    }
+    sem_set_x(cpu, d, sub ? sem_x(cpu, a) - product : sem_x(cpu, a) + product);
+}
+
+/* SMULH and UMULH: the high 64 bits of the 128-bit product. */
+static inline void sem_mulh(BiwaCpu* cpu, bool is_signed, unsigned d, unsigned n, unsigned m) {
+    uint64_t result = 0;
+    if (is_signed) {
+        const __int128 product = (__int128)(int64_t)sem_x(cpu, n) * (__int128)(int64_t)sem_x(cpu, m);
+        result = (uint64_t)(product >> 64);
+    } else {
+        const unsigned __int128 product = (unsigned __int128)sem_x(cpu, n) * (unsigned __int128)sem_x(cpu, m);
+        result = (uint64_t)(product >> 64);
+    }
+    sem_set_x(cpu, d, result);
+}
+
 #ifdef __cplusplus
 }
 #pragma clang diagnostic pop
