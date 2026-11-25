@@ -5,11 +5,13 @@
 biwa_add_module(nx LAYER 1
     SOURCES
         src/bucket_tree.cpp
+        src/cnmt.cpp
         src/compressed.cpp
         src/content.cpp
         src/crypto.cpp
         src/hash.cpp
         src/keys.cpp
+        src/nacp.cpp
         src/nca.cpp
         src/npdm.cpp
         src/nso.cpp
