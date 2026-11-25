@@ -122,6 +122,25 @@ inline std::vector<std::byte> BuildNca(const NcaBuildOptions& options, const std
     return out;
 }
 
+// A common ticket (RSA-2048 / SHA-256 signature type, signature left zero) for `rights_id`, holding
+// `title_key` encrypted with `titlekek`.
+inline std::vector<std::byte> BuildTicket(const std::array<std::uint8_t, 16>& rights_id, const nx::Aes128Key& title_key,
+                                          const nx::Aes128Key& titlekek, std::uint8_t key_type = 0,
+                                          std::uint8_t revision = 0) {
+    std::vector<std::byte> out(0x2C0);
+    PutU32(out, 0, 0x010004);
+    std::array<std::byte, 16> block{};
+    std::memcpy(block.data(), title_key.data(), 16);
+    if (!nx::AesEcbEncrypt(titlekek, block)) {
+        return {};
+    }
+    std::memcpy(out.data() + 0x180, block.data(), 16);
+    out[0x281] = static_cast<std::byte>(key_type);
+    out[0x285] = static_cast<std::byte>(revision);
+    std::memcpy(out.data() + 0x2A0, rights_id.data(), 16);
+    return out;
+}
+
 // A KeySet with the test header key and `key_area_key_application_<revision>`.
 inline std::string TestKeysText(const nx::Aes128Key& key_area_key, unsigned revision) {
     std::string text = "header_key = ";

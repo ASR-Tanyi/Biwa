@@ -9,5 +9,6 @@ biwa_add_module(nx LAYER 1
         src/nca.cpp
         src/pfs0.cpp
         src/storage.cpp
+        src/ticket.cpp
     DEPS core)
 target_link_libraries(biwa_nx PRIVATE MbedTLS::mbedcrypto)
