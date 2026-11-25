@@ -62,4 +62,20 @@ if(BIWA_BUILD_TESTS)
     set(CAPSTONE_BUILD_CSTOOL OFF CACHE BOOL "" FORCE)
     set(CAPSTONE_INSTALL OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(capstone)
+
+    if(BIWA_UNICORN)
+        # Unicorn 2.1.4: the reference CPU the A64 semantics are compared with. Tests only, Linux
+        # only. The PyPI source package carries the C sources under src/ (no release asset).
+        FetchContent_Declare(unicorn
+            URL https://files.pythonhosted.org/packages/b2/1b/b4248aa8422e86de690cf8e85cf8feae4c33405a097d1ebe71570bdaa6f5/unicorn-2.1.4.tar.gz
+            URL_HASH SHA256=00567a70e323f749b419cd86bee4f9115beab7ebba32194581c090cbb7c59cff
+            SOURCE_SUBDIR src
+            EXCLUDE_FROM_ALL
+            SYSTEM)
+        set(UNICORN_ARCH "aarch64" CACHE STRING "" FORCE)
+        set(UNICORN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(UNICORN_INSTALL OFF CACHE BOOL "" FORCE)
+        set(UNICORN_LEGACY_STATIC_ARCHIVE OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(unicorn)
+    endif()
 endif()

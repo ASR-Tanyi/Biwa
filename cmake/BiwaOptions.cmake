@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Biwa contributors
 
 option(BIWA_WERROR "Treat warnings in Biwa's own code as errors" ON)
+option(BIWA_UNICORN "Build the CPU tests that compare with Unicorn (Linux only; Unicorn is GPL-2.0 and test-only)" OFF)
 set(BIWA_SANITIZE "" CACHE STRING "Sanitizers for every target, e.g. address,undefined or thread")
 set(BIWA_CLANG_TIDY "" CACHE STRING "clang-tidy command run on Biwa's own targets (the lint preset sets it)")
 set(BIWA_CLANG_FORMAT "clang-format" CACHE STRING "clang-format used by the biwa_format targets")

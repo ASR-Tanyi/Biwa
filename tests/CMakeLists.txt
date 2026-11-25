@@ -23,6 +23,12 @@ target_compile_definitions(core_test PRIVATE BIWA_TEST_PROJECT_VERSION="${PROJEC
 biwa_add_test(a64_test SOURCES a64/capstone_test.cpp a64/decoder_test.cpp a64/sweep.cpp DEPS a64)
 target_link_libraries(a64_test PRIVATE capstone_static)
 
+if(BIWA_UNICORN)
+    # The reference CPU harness and the tests that compare with it.
+    biwa_add_test(a64_unicorn_test SOURCES a64/cpu_state.cpp a64/unicorn_cpu.cpp a64/unicorn_test.cpp DEPS a64)
+    target_link_libraries(a64_unicorn_test PRIVATE unicorn)
+endif()
+
 # The full 2^32 comparison with Capstone; run by hand (it takes minutes).
 add_executable(a64_sweep a64/sweep_main.cpp a64/sweep.cpp)
 target_include_directories(a64_sweep PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

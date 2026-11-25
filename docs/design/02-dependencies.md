@@ -49,7 +49,7 @@ Ported files keep their copyright and SPDX lines. `third_party/yuzu/UPSTREAM.md`
 | Mesa lavapipe | Headless Vulkan for GPU image tests | MIT |
 | RenderDoc | GPU captures on Windows | MIT |
 
-Unicorn's GPL-2.0 does not reach Biwa's binaries because it is linked only into test programs, which are not distributed.
+Unicorn's GPL-2.0 does not reach Biwa's binaries because it is linked only into test programs, which are not distributed: `BIWA_UNICORN` is on only in the `linux-debug` and `lint` presets, whose binaries are not packaged (the `dev` release comes from `linux-release` and `win-release`). Unicorn 2.1.4 is taken from its PyPI source package, which carries the C sources under `src/`, pinned by SHA-256; only its AArch64 part is built, with the Cortex-A57 CPU model.
 
 ## References (read, not used)
 

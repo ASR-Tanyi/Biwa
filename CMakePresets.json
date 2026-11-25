@@ -34,7 +34,8 @@
       "displayName": "Linux debug",
       "inherits": "linux-base",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug"
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BIWA_UNICORN": "ON"
       }
     },
     {
@@ -128,7 +129,8 @@
       "inherits": "linux-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "BIWA_CLANG_TIDY": "clang-tidy"
+        "BIWA_CLANG_TIDY": "clang-tidy",
+        "BIWA_UNICORN": "ON"
       }
     }
   ],
