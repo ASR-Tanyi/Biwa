@@ -1205,6 +1205,130 @@ StepResult SimdBitwise(BiwaCpu& cpu, Op op, std::uint32_t word) {
     }
 }
 
+// Integer three-same, vector (scalar false) and scalar: u is bit 29, the opcode bits 15..11.
+StepResult SimdIntThreeSame(BiwaCpu& cpu, std::uint32_t word, bool scalar) {
+    const bool q = ((word >> 30) & 1) != 0;
+    const bool u = ((word >> 29) & 1) != 0;
+    const std::uint32_t size = (word >> 22) & 3;
+    const std::uint32_t opcode = (word >> 11) & 31;
+    bool allowed = true;
+    if (scalar) {
+        switch (opcode) {
+            case 0x01:  // SQADD, UQADD
+            case 0x05:  // SQSUB, UQSUB
+            case 0x09:  // SQSHL, UQSHL
+            case 0x0B:  // SQRSHL, UQRSHL
+                break;
+            case 0x16:  // SQDMULH, SQRDMULH
+                allowed = size == 1 || size == 2;
+                break;
+            default:  // CMGT, CMGE, SSHL, SRSHL, ADD, SUB, CMTST, CMEQ: doublewords only
+                allowed = size == 3;
+                break;
+        }
+    } else {
+        switch (opcode) {
+            case 0x00:  // halving adds and subtracts
+            case 0x02:
+            case 0x04:
+            case 0x0C:  // MAX, MIN, ABD, ABA
+            case 0x0D:
+            case 0x0E:
+            case 0x0F:
+            case 0x12:  // MLA, MLS
+            case 0x14:  // MAXP, MINP
+            case 0x15:
+                allowed = size != 3;
+                break;
+            case 0x13:  // MUL; PMUL on bytes only
+                allowed = u ? size == 0 : size != 3;
+                break;
+            case 0x16:
+                allowed = size == 1 || size == 2;
+                break;
+            default:
+                break;
+        }
+        allowed = allowed && (q || size != 3);
+    }
+    if (!allowed) {
+        return StepResult::kUndefined;
+    }
+    sem_simd_int3(&cpu, u, opcode, q, scalar, 1u << size, word & 31, (word >> 5) & 31, (word >> 16) & 31);
+    return StepResult::kOk;
+}
+
+// Integer two-register forms, vector and scalar: u is bit 29, the opcode bits 16..12.
+StepResult SimdIntTwoReg(BiwaCpu& cpu, std::uint32_t word, bool scalar) {
+    const bool q = ((word >> 30) & 1) != 0;
+    const bool u = ((word >> 29) & 1) != 0;
+    const std::uint32_t size = (word >> 22) & 3;
+    const std::uint32_t opcode = (word >> 12) & 31;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t d = word & 31;
+    const unsigned esize = 1u << size;
+    switch (opcode) {
+        case 0x02:  // SADDLP, UADDLP
+        case 0x06:  // SADALP, UADALP
+            if (size == 3) {
+                return StepResult::kUndefined;
+            }
+            sem_simd_addlp(&cpu, u, opcode == 0x06, q, esize, d, n);
+            return StepResult::kOk;
+        case 0x12:  // XTN, SQXTUN
+        case 0x14:  // SQXTN, UQXTN
+            if (size == 3 || (scalar && opcode == 0x12 && !u)) {
+                return StepResult::kUndefined;
+            }
+            sem_simd_narrow(&cpu, opcode == 0x12 ? (u ? SEM_SQXTUN : SEM_XTN) : (u ? SEM_UQXTN : SEM_SQXTN), q, scalar,
+                            esize, d, n);
+            return StepResult::kOk;
+        case 0x13:  // SHLL
+            if (size == 3) {
+                return StepResult::kUndefined;
+            }
+            sem_simd_shll(&cpu, q, esize, d, n);
+            return StepResult::kOk;
+        default:
+            break;
+    }
+    // SUQADD / USQADD and SQABS / SQNEG: any size; the compares with zero, ABS and NEG: doublewords
+    // only as scalars.
+    const bool any_size = opcode == 0x03 || opcode == 0x07;
+    if (scalar ? !any_size && size != 3 : size == 3 && !q) {
+        return StepResult::kUndefined;
+    }
+    sem_simd_int2(&cpu, u, opcode, q, scalar, esize, d, n);
+    return StepResult::kOk;
+}
+
+// ADDV, SMAXV, UMAXV, SMINV, UMINV, SADDLV, UADDLV; ADDP (scalar).
+StepResult SimdAcross(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    const bool q = ((word >> 30) & 1) != 0;
+    const std::uint32_t size = (word >> 22) & 3;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t d = word & 31;
+    if (op == Op::ADDP_pair) {
+        if (size != 3) {
+            return StepResult::kUndefined;
+        }
+        sem_simd_across(&cpu, SEM_ADDV, true, 8, d, n);
+        return StepResult::kOk;
+    }
+    if (size == 3 || (size == 2 && !q)) {
+        return StepResult::kUndefined;
+    }
+    const unsigned kind = op == Op::ADDV     ? SEM_ADDV
+                          : op == Op::SMAXV  ? SEM_SMAXV
+                          : op == Op::UMAXV  ? SEM_UMAXV
+                          : op == Op::SMINV  ? SEM_SMINV
+                          : op == Op::UMINV  ? SEM_UMINV
+                          : op == Op::SADDLV ? SEM_SADDLV
+                                             : SEM_UADDLV;
+    sem_simd_across(&cpu, kind, q, 1u << size, d, n);
+    return StepResult::kOk;
+}
+
 StepResult Simd(BiwaCpu& cpu, Op op, std::uint32_t word) {
     switch (op) {
         case Op::DUP_elt_1:
@@ -1244,6 +1368,120 @@ StepResult Simd(BiwaCpu& cpu, Op op, std::uint32_t word) {
         case Op::REV32_asimd:
         case Op::REV64_asimd:
             return SimdBitwise(cpu, op, word);
+        case Op::SHADD:
+        case Op::UHADD:
+        case Op::SQADD_2:
+        case Op::UQADD_2:
+        case Op::SRHADD:
+        case Op::URHADD:
+        case Op::SHSUB:
+        case Op::UHSUB:
+        case Op::SQSUB_2:
+        case Op::UQSUB_2:
+        case Op::CMGT_reg_2:
+        case Op::CMHI_2:
+        case Op::CMGE_reg_2:
+        case Op::CMHS_2:
+        case Op::SSHL_2:
+        case Op::USHL_2:
+        case Op::SQSHL_reg_2:
+        case Op::UQSHL_reg_2:
+        case Op::SRSHL_2:
+        case Op::URSHL_2:
+        case Op::SQRSHL_2:
+        case Op::UQRSHL_2:
+        case Op::SMAX:
+        case Op::UMAX:
+        case Op::SMIN:
+        case Op::UMIN:
+        case Op::SABD:
+        case Op::UABD:
+        case Op::SABA:
+        case Op::UABA:
+        case Op::ADD_vector:
+        case Op::SUB_2:
+        case Op::CMTST_2:
+        case Op::CMEQ_reg_2:
+        case Op::MLA_vec:
+        case Op::MLS_vec:
+        case Op::MUL_vec:
+        case Op::PMUL:
+        case Op::SMAXP:
+        case Op::UMAXP:
+        case Op::SMINP:
+        case Op::UMINP:
+        case Op::SQDMULH_vec_2:
+        case Op::SQRDMULH_vec_2:
+        case Op::ADDP_vec:
+            return SimdIntThreeSame(cpu, word, false);
+        case Op::SQADD_1:
+        case Op::UQADD_1:
+        case Op::SQSUB_1:
+        case Op::UQSUB_1:
+        case Op::CMGT_reg_1:
+        case Op::CMHI_1:
+        case Op::CMGE_reg_1:
+        case Op::CMHS_1:
+        case Op::SSHL_1:
+        case Op::USHL_1:
+        case Op::SQSHL_reg_1:
+        case Op::UQSHL_reg_1:
+        case Op::SRSHL_1:
+        case Op::URSHL_1:
+        case Op::SQRSHL_1:
+        case Op::UQRSHL_1:
+        case Op::ADD_1:
+        case Op::SUB_1:
+        case Op::CMTST_1:
+        case Op::CMEQ_reg_1:
+        case Op::SQDMULH_vec_1:
+        case Op::SQRDMULH_vec_1:
+            return SimdIntThreeSame(cpu, word, true);
+        case Op::SADDLP:
+        case Op::UADDLP:
+        case Op::SADALP:
+        case Op::UADALP:
+        case Op::SUQADD_2:
+        case Op::USQADD_2:
+        case Op::SQABS_2:
+        case Op::SQNEG_2:
+        case Op::CMGT_zero_2:
+        case Op::CMGE_zero_2:
+        case Op::CMEQ_zero_2:
+        case Op::CMLE_2:
+        case Op::CMLT_2:
+        case Op::ABS_2:
+        case Op::NEG_2:
+        case Op::XTN:
+        case Op::SQXTUN_2:
+        case Op::SQXTN_2:
+        case Op::UQXTN_2:
+        case Op::SHLL:
+            return SimdIntTwoReg(cpu, word, false);
+        case Op::SUQADD_1:
+        case Op::USQADD_1:
+        case Op::SQABS_1:
+        case Op::SQNEG_1:
+        case Op::CMGT_zero_1:
+        case Op::CMGE_zero_1:
+        case Op::CMEQ_zero_1:
+        case Op::CMLE_1:
+        case Op::CMLT_1:
+        case Op::ABS_1:
+        case Op::NEG_1:
+        case Op::SQXTUN_1:
+        case Op::SQXTN_1:
+        case Op::UQXTN_1:
+            return SimdIntTwoReg(cpu, word, true);
+        case Op::ADDV:
+        case Op::SMAXV:
+        case Op::UMAXV:
+        case Op::SMINV:
+        case Op::UMINV:
+        case Op::SADDLV:
+        case Op::UADDLV:
+        case Op::ADDP_pair:
+            return SimdAcross(cpu, op, word);
         case Op::FMOV_3:    // half precision (ARMv8.2)
         case Op::SDOT_vec:  // ARMv8.2 and later: dot products, complex numbers, SHA-3, SHA-512, SM3, SM4
         case Op::UDOT_vec:

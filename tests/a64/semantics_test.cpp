@@ -723,4 +723,24 @@ INSTANTIATE_TEST_SUITE_P(SimdLater, ExceptionTest,
                                          Op::SM3PARTW2, Op::SM4E, Op::SM4EKEY),
                          Name);
 
+// Advanced SIMD: integer arithmetic, vector and scalar.
+INSTANTIATE_TEST_SUITE_P(
+    SimdInteger, SemanticsTest,
+    testing::Values(Op::SHADD, Op::UHADD, Op::SQADD_2, Op::UQADD_2, Op::SRHADD, Op::URHADD, Op::SHSUB, Op::UHSUB,
+                    Op::SQSUB_2, Op::UQSUB_2, Op::CMGT_reg_2, Op::CMHI_2, Op::CMGE_reg_2, Op::CMHS_2, Op::SSHL_2,
+                    Op::USHL_2, Op::SQSHL_reg_2, Op::UQSHL_reg_2, Op::SRSHL_2, Op::URSHL_2, Op::SQRSHL_2, Op::UQRSHL_2,
+                    Op::SMAX, Op::UMAX, Op::SMIN, Op::UMIN, Op::SABD, Op::UABD, Op::SABA, Op::UABA, Op::ADD_vector,
+                    Op::SUB_2, Op::CMTST_2, Op::CMEQ_reg_2, Op::MLA_vec, Op::MLS_vec, Op::MUL_vec, Op::PMUL, Op::SMAXP,
+                    Op::UMAXP, Op::SMINP, Op::UMINP, Op::SQDMULH_vec_2, Op::SQRDMULH_vec_2, Op::ADDP_vec, Op::SQADD_1,
+                    Op::UQADD_1, Op::SQSUB_1, Op::UQSUB_1, Op::CMGT_reg_1, Op::CMHI_1, Op::CMGE_reg_1, Op::CMHS_1,
+                    Op::SSHL_1, Op::USHL_1, Op::SQSHL_reg_1, Op::UQSHL_reg_1, Op::SRSHL_1, Op::URSHL_1, Op::SQRSHL_1,
+                    Op::UQRSHL_1, Op::ADD_1, Op::SUB_1, Op::CMTST_1, Op::CMEQ_reg_1, Op::SQDMULH_vec_1,
+                    Op::SQRDMULH_vec_1, Op::SADDLP, Op::UADDLP, Op::SADALP, Op::UADALP, Op::SUQADD_2, Op::USQADD_2,
+                    Op::SQABS_2, Op::SQNEG_2, Op::CMGT_zero_2, Op::CMGE_zero_2, Op::CMEQ_zero_2, Op::CMLE_2, Op::CMLT_2,
+                    Op::ABS_2, Op::NEG_2, Op::XTN, Op::SQXTUN_2, Op::SQXTN_2, Op::UQXTN_2, Op::SHLL, Op::SUQADD_1,
+                    Op::USQADD_1, Op::SQABS_1, Op::SQNEG_1, Op::CMGT_zero_1, Op::CMGE_zero_1, Op::CMEQ_zero_1,
+                    Op::CMLE_1, Op::CMLT_1, Op::ABS_1, Op::NEG_1, Op::SQXTUN_1, Op::SQXTN_1, Op::UQXTN_1, Op::ADDV,
+                    Op::SMAXV, Op::UMAXV, Op::SMINV, Op::UMINV, Op::SADDLV, Op::UADDLV, Op::ADDP_pair),
+    Name);
+
 }  // namespace

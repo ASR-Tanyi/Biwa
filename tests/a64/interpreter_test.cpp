@@ -427,13 +427,45 @@ TEST(A64InterpreterTest, RunsSimdMovesAndPermutes) {
     EXPECT_EQ(Low(cpu, 13), 0x0302020102010100u);
 }
 
+TEST(A64InterpreterTest, RunsSimdIntegerArithmetic) {
+    BiwaCpu cpu = Cpu();
+    const auto set = [&](unsigned v, std::array<std::uint32_t, 4> lanes) { std::memcpy(cpu.v[v], lanes.data(), 16); };
+    const auto lane = [&](unsigned v, unsigned i) {
+        std::uint32_t value = 0;
+        std::memcpy(&value, &cpu.v[v][std::size_t{4} * i], 4);
+        return value;
+    };
+    set(1, {0x7FFF0001, 2, 3, 0x80000000});
+    set(2, {0x00010001, 5, 3, 7});
+    set(8, {0xFFFFFFFF, 1, 0, 0xFFFFFFE0});             // shifts -1, 1, 0, -32
+    ASSERT_EQ(Step(cpu, 0x4EA28420), StepResult::kOk);  // add v0.4s, v1.4s, v2.4s
+    EXPECT_EQ(lane(0, 0), 0x80000002u);
+    EXPECT_EQ(lane(0, 3), 0x80000007u);
+    ASSERT_EQ(Step(cpu, 0x4E620C23), StepResult::kOk);  // sqadd v3.8h, v1.8h, v2.8h
+    EXPECT_EQ(lane(3, 0), 0x7FFF0002u);                 // 0x7FFF + 1 saturates
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_QC);
+    ASSERT_EQ(Step(cpu, 0x6E228C24), StepResult::kOk);  // cmeq v4.16b, v1.16b, v2.16b
+    EXPECT_EQ(lane(4, 0), 0x0000FFFFu);
+    ASSERT_EQ(Step(cpu, 0x4EB1B825), StepResult::kOk);  // addv s5, v1.4s
+    EXPECT_EQ(Low(cpu, 5), 0xFFFF0006u);
+    ASSERT_EQ(Step(cpu, 0x2E214826), StepResult::kOk);  // uqxtn v6.8b, v1.8h
+    EXPECT_EQ(Low(cpu, 6), 0xFF0000030002FF01u);
+    ASSERT_EQ(Step(cpu, 0x4EA85427), StepResult::kOk);  // srshl v7.4s, v1.4s, v8.4s
+    EXPECT_EQ(lane(7, 0), 0x3FFF8001u);
+    EXPECT_EQ(lane(7, 1), 4u);
+    EXPECT_EQ(lane(7, 3), 0u);
+    ASSERT_EQ(Step(cpu, 0x6EA2A429), StepResult::kOk);  // umaxp v9.4s, v1.4s, v2.4s
+    EXPECT_EQ(lane(9, 1), 0x80000000u);
+    EXPECT_EQ(lane(9, 2), 0x00010001u);
+}
+
 TEST(A64InterpreterTest, RejectsWhatItCannotRun) {
     BiwaCpu cpu = Cpu();
     EXPECT_EQ(Step(cpu, 0x91800000), StepResult::kUndefined);       // add with a reserved shift
     EXPECT_EQ(Step(cpu, 0x8BC20020), StepResult::kUndefined);       // add (shifted) with ror
     EXPECT_EQ(Step(cpu, 0x5AC00C20), StepResult::kUndefined);       // rev with the 64-bit opc on w
     EXPECT_EQ(Step(cpu, 0x00000000), StepResult::kUndefined);       // udf
-    EXPECT_EQ(Step(cpu, 0x4EA28420), StepResult::kNotImplemented);  // add v0.4s, v1.4s, v2.4s, not yet
+    EXPECT_EQ(Step(cpu, 0x4E21D400), StepResult::kNotImplemented);  // fadd v0.4s, v0.4s, v1.4s, not yet
     EXPECT_EQ(cpu.pc, 0x1000u);
 }
 
