@@ -1614,6 +1614,304 @@ static inline uint64_t sem_fp_from_half(BiwaCpu* cpu, bool dbl, uint64_t h) {
     return (negative ? sem_fp_sign_bit(false) : 0) | sem_f32_bits((float)sem_f64(as_double));
 }
 
+/* ---- Advanced SIMD: registers and lanes ---- */
+
+/* A copy of a vector register: sources are copied first, so the destination may be one of them. */
+typedef struct SemVec {
+    uint8_t b[16];
+} SemVec;
+
+static inline SemVec sem_vread(const BiwaCpu* cpu, unsigned n) {
+    SemVec v;
+    for (unsigned i = 0; i < 16; ++i) {
+        v.b[i] = cpu->v[n][i];
+    }
+    return v;
+}
+
+/* Writes Vd: all 128 bits, or with q false the low 64 and zeros above. */
+static inline void sem_vwrite(BiwaCpu* cpu, unsigned d, const SemVec* v, bool q) {
+    for (unsigned i = 0; i < 16; ++i) {
+        cpu->v[d][i] = (q || i < 8) ? v->b[i] : 0;
+    }
+}
+
+/* Lane i of `esize` bytes (1, 2, 4 or 8), zero-extended. */
+static inline uint64_t sem_lane(const SemVec* v, unsigned i, unsigned esize) {
+    uint64_t x = 0;
+    for (unsigned k = 0; k < esize; ++k) {
+        x |= (uint64_t)v->b[i * esize + k] << (8 * k);
+    }
+    return x;
+}
+
+static inline void sem_set_lane(SemVec* v, unsigned i, unsigned esize, uint64_t x) {
+    for (unsigned k = 0; k < esize; ++k) {
+        v->b[i * esize + k] = (uint8_t)(x >> (8 * k));
+    }
+}
+
+/* ---- Advanced SIMD: copies, permutes, immediates, bitwise ---- */
+
+/* DUP (element): lane `index` of Vn in every lane of Vd, or (scalar) in the low lane alone. */
+static inline void sem_dup_element(BiwaCpu* cpu, bool q, bool scalar, unsigned esize, unsigned d, unsigned n,
+                                   unsigned index) {
+    const SemVec src = sem_vread(cpu, n);
+    const uint64_t x = sem_lane(&src, index, esize);
+    SemVec r = {{0}};
+    const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / esize;
+    for (unsigned i = 0; i < lanes; ++i) {
+        sem_set_lane(&r, i, esize, x);
+    }
+    sem_vwrite(cpu, d, &r, q && !scalar);
+}
+
+/* DUP (general): the low esize bytes of Rn in every lane. */
+static inline void sem_dup_general(BiwaCpu* cpu, bool q, unsigned esize, unsigned d, unsigned n) {
+    const uint64_t x = sem_x(cpu, n);
+    SemVec r = {{0}};
+    for (unsigned i = 0; i < (q ? 16 : 8) / esize; ++i) {
+        sem_set_lane(&r, i, esize, x);
+    }
+    sem_vwrite(cpu, d, &r, q);
+}
+
+/* UMOV and SMOV (`sign`: sign-extended to 32 or 64 bits as `to_x` says). */
+static inline void sem_mov_to_general(BiwaCpu* cpu, bool sign, bool to_x, unsigned esize, unsigned d, unsigned n,
+                                      unsigned index) {
+    const SemVec src = sem_vread(cpu, n);
+    uint64_t x = sem_lane(&src, index, esize);
+    if (sign) {
+        x = sem_sign_extend(x, 8 * esize);
+    }
+    sem_set_x(cpu, d, to_x ? x : (uint32_t)x);
+}
+
+/* INS (general) and INS (element): one lane of Vd replaced, the rest kept. */
+static inline void sem_ins(BiwaCpu* cpu, unsigned esize, unsigned d, unsigned index, uint64_t x) {
+    SemVec r = sem_vread(cpu, d);
+    sem_set_lane(&r, index, esize, x);
+    sem_vwrite(cpu, d, &r, true);
+}
+
+/* EXT: bytes `index` onwards of Vm:Vn (Vn low), 8 or 16 of them. */
+static inline void sem_ext(BiwaCpu* cpu, bool q, unsigned d, unsigned n, unsigned m, unsigned index) {
+    const SemVec lo = sem_vread(cpu, n);
+    const SemVec hi = sem_vread(cpu, m);
+    const unsigned bytes = q ? 16 : 8;
+    SemVec r = {{0}};
+    for (unsigned i = 0; i < bytes; ++i) {
+        const unsigned k = index + i;
+        r.b[i] = k < bytes ? lo.b[k] : hi.b[k - bytes];
+    }
+    sem_vwrite(cpu, d, &r, q);
+}
+
+/* TBL and TBX: bytes of the table Vn.. (`regs` registers, wrapping at 31) picked by the bytes of Vm;
+   an index past the table gives 0 (TBL) or keeps Vd's byte (TBX). */
+static inline void sem_tbl(BiwaCpu* cpu, bool q, bool tbx, unsigned d, unsigned n, unsigned regs, unsigned m) {
+    uint8_t table[64];
+    for (unsigned r = 0; r < regs; ++r) {
+        for (unsigned i = 0; i < 16; ++i) {
+            table[r * 16 + i] = cpu->v[(n + r) % 32][i];
+        }
+    }
+    const SemVec indices = sem_vread(cpu, m);
+    SemVec r = sem_vread(cpu, d);
+    for (unsigned i = 0; i < (q ? 16u : 8u); ++i) {
+        const unsigned k = indices.b[i];
+        if (k < regs * 16) {
+            r.b[i] = table[k];
+        } else if (!tbx) {
+            r.b[i] = 0;
+        }
+    }
+    sem_vwrite(cpu, d, &r, q);
+}
+
+enum { SEM_UZP1, SEM_UZP2, SEM_TRN1, SEM_TRN2, SEM_ZIP1, SEM_ZIP2 };
+
+/* UZP1/2, TRN1/2, ZIP1/2. */
+static inline void sem_permute(BiwaCpu* cpu, unsigned op, bool q, unsigned esize, unsigned d, unsigned n, unsigned m) {
+    const SemVec a = sem_vread(cpu, n);
+    const SemVec b = sem_vread(cpu, m);
+    const unsigned lanes = (q ? 16 : 8) / esize;
+    const unsigned part = op == SEM_UZP2 || op == SEM_TRN2 || op == SEM_ZIP2 ? 1 : 0;
+    SemVec r = {{0}};
+    for (unsigned i = 0; i < lanes; ++i) {
+        uint64_t x = 0;
+        switch (op) {
+            case SEM_UZP1:
+            case SEM_UZP2: {
+                const unsigned k = 2 * i + part; /* of the concatenation Vm:Vn */
+                x = k < lanes ? sem_lane(&a, k, esize) : sem_lane(&b, k - lanes, esize);
+                break;
+            }
+            case SEM_TRN1:
+            case SEM_TRN2:
+                x = (i & 1) == 0 ? sem_lane(&a, (i & ~1u) + part, esize) : sem_lane(&b, (i & ~1u) + part, esize);
+                break;
+            default: {
+                const unsigned k = part * lanes / 2 + i / 2;
+                x = (i & 1) == 0 ? sem_lane(&a, k, esize) : sem_lane(&b, k, esize);
+                break;
+            }
+        }
+        sem_set_lane(&r, i, esize, x);
+    }
+    sem_vwrite(cpu, d, &r, q);
+}
+
+/* AdvSIMDExpandImm: the 64-bit pattern of MOVI, MVNI, ORR, BIC and FMOV (vector, immediate). */
+static inline uint64_t sem_simd_expand_imm(unsigned op, unsigned cmode, unsigned imm8) {
+    const uint64_t i = imm8;
+    switch (cmode >> 1) {
+        case 0:
+            return sem_replicate(i, 32);
+        case 1:
+            return sem_replicate(i << 8, 32);
+        case 2:
+            return sem_replicate(i << 16, 32);
+        case 3:
+            return sem_replicate(i << 24, 32);
+        case 4:
+            return sem_replicate(i, 16);
+        case 5:
+            return sem_replicate(i << 8, 16);
+        case 6:
+            return sem_replicate((cmode & 1) == 0 ? (i << 8) | 0xFF : (i << 16) | 0xFFFF, 32);
+        default:
+            break;
+    }
+    if ((cmode & 1) == 0) {
+        if (op == 0) {
+            return sem_replicate(i, 8);
+        }
+        uint64_t bytes = 0;
+        for (unsigned k = 0; k < 8; ++k) {
+            bytes |= ((i >> k) & 1) != 0 ? (uint64_t)0xFF << (8 * k) : 0;
+        }
+        return bytes;
+    }
+    if (op == 0) {
+        return sem_replicate(sem_fp_expand_imm(false, imm8), 32);
+    }
+    return sem_fp_expand_imm(true, imm8);
+}
+
+/* MOVI, MVNI, ORR and BIC (vector, immediate), FMOV (vector, immediate): by cmode and op. */
+static inline void sem_movi(BiwaCpu* cpu, bool q, unsigned op, unsigned cmode, unsigned imm8, unsigned d) {
+    const uint64_t imm = sem_simd_expand_imm(op, cmode, imm8);
+    /* ORR / BIC for the shifted 32- and 16-bit forms with cmode<0> set; MVNI where op is set. */
+    const bool logical = (cmode & 1) != 0 && cmode < 12;
+    SemVec r = sem_vread(cpu, d);
+    for (unsigned half = 0; half < 2; ++half) {
+        uint64_t x = sem_lane(&r, half, 8);
+        if (logical) {
+            x = op == 0 ? x | imm : x & ~imm;
+        } else if (op != 0 && cmode < 14) {
+            x = ~imm;
+        } else {
+            x = imm;
+        }
+        sem_set_lane(&r, half, 8, x);
+    }
+    sem_vwrite(cpu, d, &r, q);
+}
+
+enum { SEM_VAND, SEM_VBIC, SEM_VORR, SEM_VORN, SEM_VEOR, SEM_VBSL, SEM_VBIT, SEM_VBIF };
+
+/* AND, BIC, ORR, ORN, EOR, BSL, BIT, BIF (vector, register). */
+static inline void sem_vlogic(BiwaCpu* cpu, unsigned op, bool q, unsigned d, unsigned n, unsigned m) {
+    const SemVec a = sem_vread(cpu, n);
+    const SemVec b = sem_vread(cpu, m);
+    SemVec r = sem_vread(cpu, d);
+    for (unsigned half = 0; half < 2; ++half) {
+        const uint64_t x = sem_lane(&a, half, 8);
+        const uint64_t y = sem_lane(&b, half, 8);
+        const uint64_t z = sem_lane(&r, half, 8);
+        uint64_t out = 0;
+        switch (op) {
+            case SEM_VAND:
+                out = x & y;
+                break;
+            case SEM_VBIC:
+                out = x & ~y;
+                break;
+            case SEM_VORR:
+                out = x | y;
+                break;
+            case SEM_VORN:
+                out = x | ~y;
+                break;
+            case SEM_VEOR:
+                out = x ^ y;
+                break;
+            case SEM_VBSL:
+                out = (z & x) | (~z & y);
+                break;
+            case SEM_VBIT:
+                out = (y & x) | (~y & z);
+                break;
+            default:
+                out = (~y & x) | (y & z);
+                break;
+        }
+        sem_set_lane(&r, half, 8, out);
+    }
+    sem_vwrite(cpu, d, &r, q);
+}
+
+enum { SEM_VNOT, SEM_VRBIT, SEM_VCNT, SEM_VCLS, SEM_VCLZ };
+
+/* NOT, RBIT, CNT (on bytes), CLS and CLZ (on lanes of esize bytes). */
+static inline void sem_vbits(BiwaCpu* cpu, unsigned op, bool q, unsigned esize, unsigned d, unsigned n) {
+    const SemVec a = sem_vread(cpu, n);
+    SemVec r = {{0}};
+    const unsigned width = 8 * esize;
+    for (unsigned i = 0; i < 16 / esize; ++i) {
+        const uint64_t x = sem_lane(&a, i, esize);
+        uint64_t out = 0;
+        switch (op) {
+            case SEM_VNOT:
+                out = ~x;
+                break;
+            case SEM_VRBIT:
+                for (unsigned k = 0; k < width; ++k) {
+                    out |= ((x >> k) & 1) << (width - 1 - k);
+                }
+                break;
+            case SEM_VCNT:
+                out = (uint64_t)__builtin_popcountll(x);
+                break;
+            default: {
+                /* CLZ of x (CLS: of x ^ (x >> 1) below the sign bit, less one). */
+                uint64_t y = op == SEM_VCLS ? (x ^ (x >> 1)) & (((uint64_t)1 << (width - 1)) - 1) : x;
+                unsigned count = width;
+                if (y != 0) {
+                    count = (unsigned)__builtin_clzll(y) - (64 - width);
+                }
+                out = op == SEM_VCLS ? count - 1 : count;
+                break;
+            }
+        }
+        sem_set_lane(&r, i, esize, out);
+    }
+    sem_vwrite(cpu, d, &r, q);
+}
+
+/* REV16, REV32, REV64 (vector): the esize-byte lanes reversed within each container. */
+static inline void sem_vrev(BiwaCpu* cpu, bool q, unsigned esize, unsigned container, unsigned d, unsigned n) {
+    const SemVec a = sem_vread(cpu, n);
+    SemVec r = {{0}};
+    const unsigned per = container / esize;
+    for (unsigned i = 0; i < 16 / esize; ++i) {
+        const unsigned base = i - i % per;
+        sem_set_lane(&r, i, esize, sem_lane(&a, base + (per - 1 - i % per), esize));
+    }
+    sem_vwrite(cpu, d, &r, q);
+}
+
 #ifdef __cplusplus
 }
 #pragma clang diagnostic pop

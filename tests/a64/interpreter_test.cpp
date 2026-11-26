@@ -383,6 +383,50 @@ TEST(A64InterpreterTest, RunsFloatingPointConversions) {
     EXPECT_EQ(cpu.fpsr, SEM_FPSR_IXC);
 }
 
+TEST(A64InterpreterTest, RunsSimdMovesAndPermutes) {
+    BiwaCpu cpu = Cpu();
+    for (std::uint8_t i = 0; i < 16; ++i) {
+        cpu.v[4][i] = i;
+        cpu.v[5][i] = static_cast<std::uint8_t>(15 - i);
+        cpu.v[7][i] = static_cast<std::uint8_t>(0x70 + i);
+        cpu.v[8][i] = static_cast<std::uint8_t>(0x80 + i);
+    }
+    cpu.v[5][0] = 0x20;  // out of the one-register table
+    const std::uint32_t lane3 = 0xAABBCCDD;
+    std::memcpy(&cpu.v[2][12], &lane3, 4);
+    const auto word = [&](unsigned v, unsigned i) {
+        std::uint32_t value = 0;
+        std::memcpy(&value, &cpu.v[v][std::size_t{4} * i], 4);
+        return value;
+    };
+    ASSERT_EQ(Step(cpu, 0x4E040C20), StepResult::kOk);  // dup v0.4s, w1
+    EXPECT_EQ(word(0, 3), 0x9ABCDEF0u);
+    ASSERT_EQ(Step(cpu, 0x6E0C6440), StepResult::kOk);  // mov v0.s[1], v2.s[3]
+    EXPECT_EQ(word(0, 1), 0xAABBCCDDu);
+    EXPECT_EQ(word(0, 2), 0x9ABCDEF0u);
+    ASSERT_EQ(Step(cpu, 0x4E050083), StepResult::kOk);  // tbl v3.16b, {v4.16b}, v5.16b
+    EXPECT_EQ(cpu.v[3][0], 0);
+    EXPECT_EQ(cpu.v[3][1], 14);
+    EXPECT_EQ(cpu.v[3][15], 0);
+    ASSERT_EQ(Step(cpu, 0x0E0838E6), StepResult::kOk);  // zip1 v6.8b, v7.8b, v8.8b
+    EXPECT_EQ(Low(cpu, 6), 0x8373827281718070u);
+    EXPECT_EQ(cpu.v[6][8], 0);                          // the upper half is cleared
+    ASSERT_EQ(Step(cpu, 0x6F05E549), StepResult::kOk);  // movi v9.2d, #0xff00ff00ff00ff00
+    EXPECT_EQ(Low(cpu, 9), 0xFF00FF00FF00FF00u);
+    ASSERT_EQ(Step(cpu, 0x4F03F60A), StepResult::kOk);  // fmov v10.4s, #1.0
+    EXPECT_EQ(word(10, 3), 0x3F800000u);
+    ASSERT_EQ(Step(cpu, 0x6F00242B), StepResult::kOk);  // mvni v11.4s, #1, lsl #8
+    EXPECT_EQ(word(11, 0), 0xFFFFFEFFu);
+    ASSERT_EQ(Step(cpu, 0x6E05188C), StepResult::kOk);  // ext v12.16b, v4.16b, v5.16b, #3
+    EXPECT_EQ(cpu.v[12][0], 3);
+    EXPECT_EQ(cpu.v[12][13], 0x20);
+    EXPECT_EQ(cpu.v[12][15], 13);
+    ASSERT_EQ(Step(cpu, 0x0E1F3C82), StepResult::kOk);  // umov w2, v4.b[15]
+    EXPECT_EQ(cpu.x[2], 15u);
+    ASSERT_EQ(Step(cpu, 0x0E20588D), StepResult::kOk);  // cnt v13.8b, v4.8b
+    EXPECT_EQ(Low(cpu, 13), 0x0302020102010100u);
+}
+
 TEST(A64InterpreterTest, RejectsWhatItCannotRun) {
     BiwaCpu cpu = Cpu();
     EXPECT_EQ(Step(cpu, 0x91800000), StepResult::kUndefined);       // add with a reserved shift

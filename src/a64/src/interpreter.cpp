@@ -1031,6 +1031,250 @@ StepResult FloatingPoint(BiwaCpu& cpu, Op op, std::uint32_t word) {
     return StepResult::kOk;
 }
 
+// ---- Advanced SIMD ----
+
+// The element size (log2 of bytes) and index an imm5 field names: its lowest set bit gives the
+// size; none in the low four bits is reserved.
+struct Imm5 {
+    unsigned size;
+    unsigned index;
+};
+
+std::optional<Imm5> DecodeImm5(std::uint32_t imm5) {
+    if ((imm5 & 15) == 0) {
+        return std::nullopt;
+    }
+    const auto size = static_cast<unsigned>(__builtin_ctz(imm5));
+    return Imm5{size, imm5 >> (size + 1)};
+}
+
+// DUP, SMOV, UMOV, INS.
+StepResult SimdCopy(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    const bool q = ((word >> 30) & 1) != 0;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t d = word & 31;
+    const std::optional<Imm5> imm5 = DecodeImm5((word >> 16) & 31);
+    if (!imm5) {
+        return StepResult::kUndefined;
+    }
+    const unsigned size = imm5->size;
+    const unsigned esize = 1u << size;
+    switch (op) {
+        case Op::DUP_elt_1:
+            sem_dup_element(&cpu, false, true, esize, d, n, imm5->index);
+            break;
+        case Op::DUP_elt_2:
+        case Op::DUP_gen:
+            if (size == 3 && !q) {
+                return StepResult::kUndefined;
+            }
+            if (op == Op::DUP_gen) {
+                sem_dup_general(&cpu, q, esize, d, n);
+            } else {
+                sem_dup_element(&cpu, q, false, esize, d, n, imm5->index);
+            }
+            break;
+        case Op::SMOV:
+            if (size > (q ? 2u : 1u)) {
+                return StepResult::kUndefined;
+            }
+            sem_mov_to_general(&cpu, true, q, esize, d, n, imm5->index);
+            break;
+        case Op::UMOV:
+            if (q ? size != 3 : size > 2) {
+                return StepResult::kUndefined;
+            }
+            sem_mov_to_general(&cpu, false, q, esize, d, n, imm5->index);
+            break;
+        case Op::INS_gen:
+            sem_ins(&cpu, esize, d, imm5->index, sem_x(&cpu, n));
+            break;
+        default: {  // INS (element): the source index in imm4
+            const SemVec src = sem_vread(&cpu, n);
+            const unsigned from = ((word >> 11) & 15) >> size;
+            sem_ins(&cpu, esize, d, imm5->index, sem_lane(&src, from, esize));
+            break;
+        }
+    }
+    return StepResult::kOk;
+}
+
+StepResult SimdPermute(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    const bool q = ((word >> 30) & 1) != 0;
+    const std::uint32_t size = (word >> 22) & 3;
+    const std::uint32_t m = (word >> 16) & 31;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t d = word & 31;
+    switch (op) {
+        case Op::EXT: {
+            const std::uint32_t index = (word >> 11) & 15;
+            if (!q && index > 7) {
+                return StepResult::kUndefined;
+            }
+            sem_ext(&cpu, q, d, n, m, index);
+            return StepResult::kOk;
+        }
+        case Op::TBL:
+        case Op::TBX:
+            sem_tbl(&cpu, q, op == Op::TBX, d, n, ((word >> 13) & 3) + 1, m);
+            return StepResult::kOk;
+        default:
+            break;
+    }
+    if (size == 3 && !q) {
+        return StepResult::kUndefined;
+    }
+    const unsigned kind = op == Op::UZP1   ? SEM_UZP1
+                          : op == Op::UZP2 ? SEM_UZP2
+                          : op == Op::TRN1 ? SEM_TRN1
+                          : op == Op::TRN2 ? SEM_TRN2
+                          : op == Op::ZIP1 ? SEM_ZIP1
+                                           : SEM_ZIP2;
+    sem_permute(&cpu, kind, q, 1u << size, d, n, m);
+    return StepResult::kOk;
+}
+
+// MOVI, MVNI, ORR / BIC (immediate), FMOV (vector, immediate); the bitwise forms; REV, CNT, CLS,
+// CLZ, NOT, RBIT.
+StepResult SimdBitwise(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    const bool q = ((word >> 30) & 1) != 0;
+    const std::uint32_t size = (word >> 22) & 3;
+    const std::uint32_t m = (word >> 16) & 31;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t d = word & 31;
+    switch (op) {
+        case Op::MOVI:
+        case Op::FMOV_2: {
+            // MOVI's pattern also covers FMOV (vector, immediate): cmode 1111 (the decoder tries
+            // MOVI first, as dynarmic does).
+            const std::uint32_t o = (word >> 29) & 1;
+            const std::uint32_t cmode = (word >> 12) & 15;
+            if (cmode == 15 && o != 0 && !q) {
+                return StepResult::kUndefined;  // FMOV (vector, double) needs Q
+            }
+            const std::uint32_t imm8 = (((word >> 16) & 7) << 5) | ((word >> 5) & 31);
+            sem_movi(&cpu, q, o, cmode, imm8, d);
+            return StepResult::kOk;
+        }
+        case Op::AND_asimd:
+        case Op::BIC_asimd_reg:
+        case Op::ORR_asimd_reg:
+        case Op::ORN_asimd:
+        case Op::EOR_asimd:
+        case Op::BSL:
+        case Op::BIT:
+        case Op::BIF: {
+            const unsigned kind = op == Op::AND_asimd       ? SEM_VAND
+                                  : op == Op::BIC_asimd_reg ? SEM_VBIC
+                                  : op == Op::ORR_asimd_reg ? SEM_VORR
+                                  : op == Op::ORN_asimd     ? SEM_VORN
+                                  : op == Op::EOR_asimd     ? SEM_VEOR
+                                  : op == Op::BSL           ? SEM_VBSL
+                                  : op == Op::BIT           ? SEM_VBIT
+                                                            : SEM_VBIF;
+            sem_vlogic(&cpu, kind, q, d, n, m);
+            return StepResult::kOk;
+        }
+        case Op::NOT:
+            sem_vbits(&cpu, SEM_VNOT, q, 1, d, n);
+            return StepResult::kOk;
+        case Op::RBIT_asimd:
+            sem_vbits(&cpu, SEM_VRBIT, q, 1, d, n);
+            return StepResult::kOk;
+        case Op::CNT:
+            if (size != 0) {
+                return StepResult::kUndefined;
+            }
+            sem_vbits(&cpu, SEM_VCNT, q, 1, d, n);
+            return StepResult::kOk;
+        case Op::CLS_asimd:
+        case Op::CLZ_asimd:
+            if (size == 3) {
+                return StepResult::kUndefined;
+            }
+            sem_vbits(&cpu, op == Op::CLS_asimd ? SEM_VCLS : SEM_VCLZ, q, 1u << size, d, n);
+            return StepResult::kOk;
+        default: {  // REV16, REV32, REV64: the container must be wider than the lanes
+            const unsigned container = op == Op::REV16_asimd ? 2 : op == Op::REV32_asimd ? 4 : 8;
+            if ((1u << size) >= container) {
+                return StepResult::kUndefined;
+            }
+            sem_vrev(&cpu, q, 1u << size, container, d, n);
+            return StepResult::kOk;
+        }
+    }
+}
+
+StepResult Simd(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    switch (op) {
+        case Op::DUP_elt_1:
+        case Op::DUP_elt_2:
+        case Op::DUP_gen:
+        case Op::SMOV:
+        case Op::UMOV:
+        case Op::INS_gen:
+        case Op::INS_elt:
+            return SimdCopy(cpu, op, word);
+        case Op::EXT:
+        case Op::TBL:
+        case Op::TBX:
+        case Op::UZP1:
+        case Op::UZP2:
+        case Op::TRN1:
+        case Op::TRN2:
+        case Op::ZIP1:
+        case Op::ZIP2:
+            return SimdPermute(cpu, op, word);
+        case Op::MOVI:
+        case Op::FMOV_2:
+        case Op::AND_asimd:
+        case Op::BIC_asimd_reg:
+        case Op::ORR_asimd_reg:
+        case Op::ORN_asimd:
+        case Op::EOR_asimd:
+        case Op::BSL:
+        case Op::BIT:
+        case Op::BIF:
+        case Op::NOT:
+        case Op::RBIT_asimd:
+        case Op::CNT:
+        case Op::CLS_asimd:
+        case Op::CLZ_asimd:
+        case Op::REV16_asimd:
+        case Op::REV32_asimd:
+        case Op::REV64_asimd:
+            return SimdBitwise(cpu, op, word);
+        case Op::FMOV_3:    // half precision (ARMv8.2)
+        case Op::SDOT_vec:  // ARMv8.2 and later: dot products, complex numbers, SHA-3, SHA-512, SM3, SM4
+        case Op::UDOT_vec:
+        case Op::SDOT_elt:
+        case Op::UDOT_elt:
+        case Op::FCMLA_vec:
+        case Op::FCADD_vec:
+        case Op::FCMLA_elt:
+        case Op::EOR3:
+        case Op::BCAX:
+        case Op::RAX1:
+        case Op::XAR:
+        case Op::SHA512H:
+        case Op::SHA512H2:
+        case Op::SHA512SU0:
+        case Op::SHA512SU1:
+        case Op::SM3SS1:
+        case Op::SM3TT1A:
+        case Op::SM3TT1B:
+        case Op::SM3TT2A:
+        case Op::SM3TT2B:
+        case Op::SM3PARTW1:
+        case Op::SM3PARTW2:
+        case Op::SM4E:
+        case Op::SM4EKEY:
+            return StepResult::kUndefined;
+        default:
+            return StepResult::kNotImplemented;
+    }
+}
+
 StepResult System(BiwaCpu& cpu, Op op, std::uint32_t word) {
     switch (op) {
         case Op::SVC:
@@ -1142,8 +1386,10 @@ StepResult System(BiwaCpu& cpu, Op op, std::uint32_t word) {
         case Op::FCVTZS_float_int:
         case Op::FCVTZU_float_int:
             return FloatingPoint(cpu, op, word);
-        default:
-            return LoadStore(cpu, op, word);
+        default: {
+            const StepResult result = LoadStore(cpu, op, word);
+            return result == StepResult::kNotImplemented ? Simd(cpu, op, word) : result;
+        }
     }
 }
 

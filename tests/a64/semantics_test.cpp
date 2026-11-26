@@ -703,4 +703,24 @@ INSTANTIATE_TEST_SUITE_P(FloatConversions, SemanticsTest,
                                          Op::FCVTZU_float_int),
                          Name);
 
+// Advanced SIMD: copies, permutes, immediates, bitwise. (FMOV_2 never decodes: MOVI's pattern
+// covers it and is tried first.)
+INSTANTIATE_TEST_SUITE_P(SimdMoves, SemanticsTest,
+                         testing::Values(Op::DUP_elt_1, Op::DUP_elt_2, Op::DUP_gen, Op::SMOV, Op::UMOV, Op::INS_gen,
+                                         Op::INS_elt, Op::EXT, Op::TBL, Op::TBX, Op::UZP1, Op::UZP2, Op::TRN1, Op::TRN2,
+                                         Op::ZIP1, Op::ZIP2, Op::MOVI, Op::AND_asimd, Op::BIC_asimd_reg,
+                                         Op::ORR_asimd_reg, Op::ORN_asimd, Op::EOR_asimd, Op::BSL, Op::BIT, Op::BIF,
+                                         Op::NOT, Op::RBIT_asimd, Op::CNT, Op::CLS_asimd, Op::CLZ_asimd,
+                                         Op::REV16_asimd, Op::REV32_asimd, Op::REV64_asimd),
+                         Name);
+
+// Advanced SIMD from later architecture versions.
+INSTANTIATE_TEST_SUITE_P(SimdLater, ExceptionTest,
+                         testing::Values(Op::FMOV_3, Op::SDOT_vec, Op::UDOT_vec, Op::SDOT_elt, Op::UDOT_elt,
+                                         Op::FCMLA_vec, Op::FCADD_vec, Op::FCMLA_elt, Op::EOR3, Op::BCAX, Op::RAX1,
+                                         Op::XAR, Op::SHA512H, Op::SHA512H2, Op::SHA512SU0, Op::SHA512SU1, Op::SM3SS1,
+                                         Op::SM3TT1A, Op::SM3TT1B, Op::SM3TT2A, Op::SM3TT2B, Op::SM3PARTW1,
+                                         Op::SM3PARTW2, Op::SM4E, Op::SM4EKEY),
+                         Name);
+
 }  // namespace
