@@ -415,6 +415,102 @@ StepResult LoadStoreRegisterOffset(BiwaCpu& cpu, Op op, std::uint32_t word, bool
     return GeneralAccess(cpu, size, LoadStoreOpc(word), f('t'), address);
 }
 
+// The post-index writeback of the structure forms: Xm, or the bytes transferred when Rm is 31.
+void StructureWriteback(BiwaCpu& cpu, std::uint32_t word, std::uint64_t base, std::uint64_t bytes) {
+    if (((word >> 23) & 1) == 0) {
+        return;
+    }
+    const std::uint32_t m = (word >> 16) & 31;
+    sem_set_xsp(&cpu, word >> 5 & 31, base + (m == 31 ? bytes : sem_x(&cpu, m)));
+}
+
+// LD1-LD4 / ST1-ST4 (multiple structures).
+StepResult LoadStoreMultiple(BiwaCpu& cpu, std::uint32_t word) {
+    const bool q = ((word >> 30) & 1) != 0;
+    const bool load = ((word >> 22) & 1) != 0;
+    const std::uint32_t size = (word >> 10) & 3;
+    unsigned rpt = 1;
+    unsigned selem = 1;
+    switch ((word >> 12) & 15) {
+        case 0:  // LD4 / ST4
+            selem = 4;
+            break;
+        case 2:  // LD1 / ST1, four registers
+            rpt = 4;
+            break;
+        case 4:  // LD3 / ST3
+            selem = 3;
+            break;
+        case 6:  // LD1 / ST1, three registers
+            rpt = 3;
+            break;
+        case 7:  // LD1 / ST1, one register
+            break;
+        case 8:  // LD2 / ST2
+            selem = 2;
+            break;
+        case 10:  // LD1 / ST1, two registers
+            rpt = 2;
+            break;
+        default:
+            return StepResult::kUndefined;
+    }
+    if (size == 3 && !q && selem != 1) {
+        return StepResult::kUndefined;  // 1D arrangements only for LD1 / ST1
+    }
+    const std::uint64_t base = sem_xsp(&cpu, (word >> 5) & 31);
+    const std::uint64_t bytes = sem_ldst_multiple(&cpu, load, q, size, rpt, selem, word & 31, base);
+    StructureWriteback(cpu, word, base, bytes);
+    return StepResult::kOk;
+}
+
+// LD1-LD4 / ST1-ST4 (single structure) and LD1R-LD4R.
+StepResult LoadStoreSingle(BiwaCpu& cpu, std::uint32_t word) {
+    const std::uint32_t q = (word >> 30) & 1;
+    const bool load = ((word >> 22) & 1) != 0;
+    const std::uint32_t r = (word >> 21) & 1;
+    const std::uint32_t opcode = (word >> 13) & 7;
+    const std::uint32_t s = (word >> 12) & 1;
+    const std::uint32_t size = (word >> 10) & 3;
+    const unsigned selem = (((opcode & 1) << 1) | r) + 1;
+    std::uint32_t scale = opcode >> 1;
+    std::uint32_t index = 0;
+    const std::uint64_t base = sem_xsp(&cpu, (word >> 5) & 31);
+    switch (scale) {
+        case 3: {
+            if (!load || s != 0) {
+                return StepResult::kUndefined;
+            }
+            const std::uint64_t bytes = sem_ld_replicate(&cpu, q != 0, size, selem, word & 31, base);
+            StructureWriteback(cpu, word, base, bytes);
+            return StepResult::kOk;
+        }
+        case 0:
+            index = (q << 3) | (s << 2) | size;
+            break;
+        case 1:
+            if ((size & 1) != 0) {
+                return StepResult::kUndefined;
+            }
+            index = (q << 2) | (s << 1) | (size >> 1);
+            break;
+        default:
+            if ((size & 2) != 0 || (size == 1 && s != 0)) {
+                return StepResult::kUndefined;
+            }
+            if (size == 0) {
+                index = (q << 1) | s;
+            } else {
+                index = q;
+                scale = 3;
+            }
+            break;
+    }
+    const std::uint64_t bytes = sem_ldst_single(&cpu, load, scale, selem, index, word & 31, base);
+    StructureWriteback(cpu, word, base, bytes);
+    return StepResult::kOk;
+}
+
 StepResult LoadStore(BiwaCpu& cpu, Op op, std::uint32_t word) {
     switch (op) {
         case Op::LDR_lit_gen:
@@ -461,6 +557,36 @@ StepResult LoadStore(BiwaCpu& cpu, Op op, std::uint32_t word) {
         case Op::STR_reg_fpsimd:
         case Op::LDR_reg_fpsimd:
             return LoadStoreRegisterOffset(cpu, op, word, true);
+        case Op::STx_mult_1:
+        case Op::STx_mult_2:
+        case Op::LDx_mult_1:
+        case Op::LDx_mult_2:
+            return LoadStoreMultiple(cpu, word);
+        case Op::ST1_sngl_1:
+        case Op::ST1_sngl_2:
+        case Op::ST2_sngl_1:
+        case Op::ST2_sngl_2:
+        case Op::ST3_sngl_1:
+        case Op::ST3_sngl_2:
+        case Op::ST4_sngl_1:
+        case Op::ST4_sngl_2:
+        case Op::LD1_sngl_1:
+        case Op::LD1_sngl_2:
+        case Op::LD2_sngl_1:
+        case Op::LD2_sngl_2:
+        case Op::LD3_sngl_1:
+        case Op::LD3_sngl_2:
+        case Op::LD4_sngl_1:
+        case Op::LD4_sngl_2:
+        case Op::LD1R_1:
+        case Op::LD1R_2:
+        case Op::LD2R_1:
+        case Op::LD2R_2:
+        case Op::LD3R_1:
+        case Op::LD3R_2:
+        case Op::LD4R_1:
+        case Op::LD4R_2:
+            return LoadStoreSingle(cpu, word);
         default:
             return StepResult::kNotImplemented;
     }

@@ -139,6 +139,38 @@ TEST(A64InterpreterTest, RunsLoadsAndStores) {
     EXPECT_EQ(Step(cpu, 0xF8620820), StepResult::kUndefined);  // ldr x0, [x1, w2, uxtb]: reserved
 }
 
+TEST(A64InterpreterTest, RunsStructureLoadsAndStores) {
+    alignas(16) std::array<std::uint32_t, 32> memory{};
+    for (std::uint32_t i = 0; i < 8; ++i) {
+        memory[i] = i;
+    }
+    memory[8] = 0x5A;
+    const auto lane = [](const BiwaCpu& cpu, unsigned v, unsigned i) {
+        std::uint32_t value = 0;
+        std::memcpy(&value, &cpu.v[v][std::size_t{4} * i], 4);
+        return value;
+    };
+    BiwaCpu cpu = Cpu();
+    const std::uint64_t base = reinterpret_cast<std::uintptr_t>(memory.data());
+    cpu.x[10] = base;
+    ASSERT_EQ(Step(cpu, 0x4CDF8940), StepResult::kOk);  // ld2 {v0.4s, v1.4s}, [x10], #32
+    for (unsigned i = 0; i < 4; ++i) {
+        EXPECT_EQ(lane(cpu, 0, i), 2 * i);
+        EXPECT_EQ(lane(cpu, 1, i), 2 * i + 1);
+    }
+    EXPECT_EQ(cpu.x[10], base + 32);
+    ASSERT_EQ(Step(cpu, 0x0D40C144), StepResult::kOk);  // ld1r {v4.8b}, [x10]
+    EXPECT_EQ(lane(cpu, 4, 0), 0x5A5A5A5Au);
+    EXPECT_EQ(lane(cpu, 4, 1), 0x5A5A5A5Au);
+    EXPECT_EQ(lane(cpu, 4, 2), 0u);
+    ASSERT_EQ(Step(cpu, 0x4D009141), StepResult::kOk);  // st1 {v1.s}[3], [x10]
+    EXPECT_EQ(memory[8], 7u);
+    cpu.x[11] = 100;
+    ASSERT_EQ(Step(cpu, 0x4CCBAD42), StepResult::kOk);  // ld1 {v2.2d, v3.2d}, [x10], x11
+    EXPECT_EQ(lane(cpu, 2, 0), 7u);
+    EXPECT_EQ(cpu.x[10], base + 132);
+}
+
 TEST(A64InterpreterTest, RejectsWhatItCannotRun) {
     BiwaCpu cpu = Cpu();
     EXPECT_EQ(Step(cpu, 0x91800000), StepResult::kUndefined);       // add with a reserved shift

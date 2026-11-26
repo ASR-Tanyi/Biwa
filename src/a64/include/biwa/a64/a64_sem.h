@@ -604,6 +604,70 @@ static inline void sem_ldst_pair_v(BiwaCpu* cpu, unsigned scale, bool load, unsi
     sem_ldst_v(cpu, scale, load, t2, address + (1u << scale));
 }
 
+/* LD1-LD4 and ST1-ST4 (multiple structures): `rpt` groups of `selem` registers from Vt (wrapping
+   at 31), elements of 1 << size bytes interleaved across each group's registers. 64-bit loads (q
+   false) clear the upper halves. Returns the bytes transferred. */
+static inline uint64_t sem_ldst_multiple(BiwaCpu* cpu, bool load, bool q, unsigned size, unsigned rpt, unsigned selem,
+                                         unsigned t, uint64_t address) {
+    const unsigned ebytes = 1u << size;
+    const unsigned elements = (q ? 16u : 8u) / ebytes;
+    uint64_t offset = 0;
+    if (load && !q) {
+        for (unsigned r = 0; r < rpt * selem; ++r) {
+            for (unsigned i = 8; i < 16; ++i) {
+                cpu->v[(t + r) % 32][i] = 0;
+            }
+        }
+    }
+    for (unsigned r = 0; r < rpt; ++r) {
+        for (unsigned e = 0; e < elements; ++e) {
+            for (unsigned s = 0; s < selem; ++s) {
+                uint8_t* lane = &cpu->v[(t + r + s) % 32][(uint64_t)e * ebytes];
+                if (load) {
+                    sem_copy_in(lane, address + offset, ebytes);
+                } else {
+                    sem_copy_out(address + offset, lane, ebytes);
+                }
+                offset += ebytes;
+            }
+        }
+    }
+    return offset;
+}
+
+/* LD1-LD4 and ST1-ST4 (single structure): element `index` (1 << scale bytes) of `selem`
+   consecutive registers from Vt; the other elements stay. Returns the bytes transferred. */
+static inline uint64_t sem_ldst_single(BiwaCpu* cpu, bool load, unsigned scale, unsigned selem, unsigned index,
+                                       unsigned t, uint64_t address) {
+    const unsigned ebytes = 1u << scale;
+    for (unsigned s = 0; s < selem; ++s) {
+        uint8_t* lane = &cpu->v[(t + s) % 32][(uint64_t)index * ebytes];
+        if (load) {
+            sem_copy_in(lane, address + (uint64_t)s * ebytes, ebytes);
+        } else {
+            sem_copy_out(address + (uint64_t)s * ebytes, lane, ebytes);
+        }
+    }
+    return (uint64_t)selem * ebytes;
+}
+
+/* LD1R-LD4R: one element (1 << scale bytes) per register, copied to all of its elements (the low
+   64 bits only when q is false; the rest is cleared). Returns the bytes transferred. */
+static inline uint64_t sem_ld_replicate(BiwaCpu* cpu, bool q, unsigned scale, unsigned selem, unsigned t,
+                                        uint64_t address) {
+    const unsigned ebytes = 1u << scale;
+    const unsigned bytes = q ? 16u : 8u;
+    for (unsigned s = 0; s < selem; ++s) {
+        uint8_t element[8] = {0};
+        sem_copy_in(element, address + (uint64_t)s * ebytes, ebytes);
+        uint8_t* reg = cpu->v[(t + s) % 32];
+        for (unsigned i = 0; i < 16; ++i) {
+            reg[i] = i < bytes ? element[i % ebytes] : 0;
+        }
+    }
+    return (uint64_t)selem * ebytes;
+}
+
 #ifdef __cplusplus
 }
 #pragma clang diagnostic pop

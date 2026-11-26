@@ -223,4 +223,14 @@ INSTANTIATE_TEST_SUITE_P(LoadStore, MemorySemanticsTest,
                                          Op::STR_reg_fpsimd, Op::LDR_reg_fpsimd),
                          Name);
 
+// Loads and stores of SIMD structures.
+INSTANTIATE_TEST_SUITE_P(Structures, MemorySemanticsTest,
+                         testing::Values(Op::STx_mult_1, Op::STx_mult_2, Op::LDx_mult_1, Op::LDx_mult_2, Op::ST1_sngl_1,
+                                         Op::ST1_sngl_2, Op::ST2_sngl_1, Op::ST2_sngl_2, Op::ST3_sngl_1, Op::ST3_sngl_2,
+                                         Op::ST4_sngl_1, Op::ST4_sngl_2, Op::LD1_sngl_1, Op::LD1_sngl_2, Op::LD2_sngl_1,
+                                         Op::LD2_sngl_2, Op::LD3_sngl_1, Op::LD3_sngl_2, Op::LD4_sngl_1, Op::LD4_sngl_2,
+                                         Op::LD1R_1, Op::LD1R_2, Op::LD2R_1, Op::LD2R_2, Op::LD3R_1, Op::LD3R_2,
+                                         Op::LD4R_1, Op::LD4R_2),
+                         Name);
+
 }  // namespace
