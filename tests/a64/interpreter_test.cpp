@@ -492,13 +492,34 @@ TEST(A64InterpreterTest, RunsSimdFloatingPoint) {
     sem_fp_fold(&cpu);
 }
 
+TEST(A64InterpreterTest, RunsCrypto) {
+    BiwaCpu cpu = Cpu();
+    std::memset(cpu.v[0], 0, 16);
+    std::memset(cpu.v[1], 0, 16);
+    ASSERT_EQ(Step(cpu, 0x4E284820), StepResult::kOk);  // aese v0.16b, v1.16b: SubBytes(0) = 0x63
+    EXPECT_EQ(Low(cpu, 0), 0x6363636363636363u);
+    const std::array<std::uint8_t, 4> column = {0xDB, 0x13, 0x53, 0x45};  // the classic MixColumns example
+    for (std::size_t i = 0; i < 16; ++i) {
+        cpu.v[3][i] = column[i % 4];
+    }
+    ASSERT_EQ(Step(cpu, 0x4E286862), StepResult::kOk);  // aesmc v2.16b, v3.16b
+    EXPECT_EQ(cpu.v[2][0], 0x8E);
+    EXPECT_EQ(cpu.v[2][1], 0x4D);
+    EXPECT_EQ(cpu.v[2][2], 0xA1);
+    EXPECT_EQ(cpu.v[2][3], 0xBC);
+    const std::uint32_t e = 0x80000001;
+    std::memcpy(cpu.v[5], &e, 4);
+    ASSERT_EQ(Step(cpu, 0x5E2808A4), StepResult::kOk);  // sha1h s4, s5: rotated left by 30
+    EXPECT_EQ(Low(cpu, 4), 0x60000000u);
+}
+
 TEST(A64InterpreterTest, RejectsWhatItCannotRun) {
     BiwaCpu cpu = Cpu();
     EXPECT_EQ(Step(cpu, 0x91800000), StepResult::kUndefined);       // add with a reserved shift
     EXPECT_EQ(Step(cpu, 0x8BC20020), StepResult::kUndefined);       // add (shifted) with ror
     EXPECT_EQ(Step(cpu, 0x5AC00C20), StepResult::kUndefined);       // rev with the 64-bit opc on w
     EXPECT_EQ(Step(cpu, 0x00000000), StepResult::kUndefined);       // udf
-    EXPECT_EQ(Step(cpu, 0x4E284820), StepResult::kNotImplemented);  // aese v0.16b, v1.16b, not yet
+    EXPECT_EQ(Step(cpu, 0xD53BE020), StepResult::kNotImplemented);  // mrs x0, cntpct_el0: from the runtime
     EXPECT_EQ(cpu.pc, 0x1000u);
 }
 

@@ -837,4 +837,11 @@ INSTANTIATE_TEST_SUITE_P(SimdHalf, ExceptionTest,
                                          Op::FRSQRTE_3, Op::FMLA_elt_3, Op::FMLS_elt_3),
                          Name);
 
+// The crypto extension.
+INSTANTIATE_TEST_SUITE_P(Crypto, SemanticsTest,
+                         testing::Values(Op::AESE, Op::AESD, Op::AESMC, Op::AESIMC, Op::SHA1C, Op::SHA1P, Op::SHA1M,
+                                         Op::SHA1H, Op::SHA1SU0, Op::SHA1SU1, Op::SHA256H, Op::SHA256H2, Op::SHA256SU0,
+                                         Op::SHA256SU1),
+                         Name);
+
 }  // namespace

@@ -1754,6 +1754,52 @@ StepResult SimdFloatFixed(BiwaCpu& cpu, std::uint32_t word, bool scalar) {
     return StepResult::kOk;
 }
 
+// AES, SHA-1, SHA-256 (the A57 has the crypto extension).
+StepResult Crypto(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    const std::uint32_t m = (word >> 16) & 31;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t d = word & 31;
+    switch (op) {
+        case Op::AESE:
+        case Op::AESD:
+            sem_aes_round(&cpu, op == Op::AESD, d, n);
+            break;
+        case Op::AESMC:
+        case Op::AESIMC:
+            sem_aes_mix(&cpu, op == Op::AESIMC, d, n);
+            break;
+        case Op::SHA1C:
+            sem_sha1_hash(&cpu, SEM_SHA1C, d, n, m);
+            break;
+        case Op::SHA1P:
+            sem_sha1_hash(&cpu, SEM_SHA1P, d, n, m);
+            break;
+        case Op::SHA1M:
+            sem_sha1_hash(&cpu, SEM_SHA1M, d, n, m);
+            break;
+        case Op::SHA1H:
+            sem_sha1h(&cpu, d, n);
+            break;
+        case Op::SHA1SU0:
+            sem_sha1su0(&cpu, d, n, m);
+            break;
+        case Op::SHA1SU1:
+            sem_sha1su1(&cpu, d, n);
+            break;
+        case Op::SHA256H:
+        case Op::SHA256H2:
+            sem_sha256_hash(&cpu, op == Op::SHA256H, d, n, m);
+            break;
+        case Op::SHA256SU0:
+            sem_sha256su0(&cpu, d, n);
+            break;
+        default:  // SHA256SU1
+            sem_sha256su1(&cpu, d, n, m);
+            break;
+    }
+    return StepResult::kOk;
+}
+
 StepResult Simd(BiwaCpu& cpu, Op op, std::uint32_t word) {
     switch (op) {
         case Op::DUP_elt_1:
@@ -2118,6 +2164,21 @@ StepResult Simd(BiwaCpu& cpu, Op op, std::uint32_t word) {
         case Op::FCVTZS_fix_1:
         case Op::FCVTZU_fix_1:
             return SimdFloatFixed(cpu, word, true);
+        case Op::AESE:
+        case Op::AESD:
+        case Op::AESMC:
+        case Op::AESIMC:
+        case Op::SHA1C:
+        case Op::SHA1P:
+        case Op::SHA1M:
+        case Op::SHA1H:
+        case Op::SHA1SU0:
+        case Op::SHA1SU1:
+        case Op::SHA256H:
+        case Op::SHA256H2:
+        case Op::SHA256SU0:
+        case Op::SHA256SU1:
+            return Crypto(cpu, op, word);
         case Op::FCMEQ_reg_1:
         case Op::FRECPS_1:
         case Op::FRSQRTS_1:

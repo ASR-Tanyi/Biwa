@@ -2871,6 +2871,236 @@ static inline void sem_simd_fcvtn(BiwaCpu* cpu, bool q, bool scalar, bool dbl, b
     sem_vwrite(cpu, d, &r, true);
 }
 
+/* ---- Crypto extension: AES, SHA-1, SHA-256 ---- */
+
+/* Portable versions; AES-NI and SHA-NI fast paths can come later (docs/design/04). */
+
+static const uint8_t sem_aes_sbox[256] = {
+    0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5, 0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76, 0xCA, 0x82, 0xC9,
+    0x7D, 0xFA, 0x59, 0x47, 0xF0, 0xAD, 0xD4, 0xA2, 0xAF, 0x9C, 0xA4, 0x72, 0xC0, 0xB7, 0xFD, 0x93, 0x26, 0x36, 0x3F,
+    0xF7, 0xCC, 0x34, 0xA5, 0xE5, 0xF1, 0x71, 0xD8, 0x31, 0x15, 0x04, 0xC7, 0x23, 0xC3, 0x18, 0x96, 0x05, 0x9A, 0x07,
+    0x12, 0x80, 0xE2, 0xEB, 0x27, 0xB2, 0x75, 0x09, 0x83, 0x2C, 0x1A, 0x1B, 0x6E, 0x5A, 0xA0, 0x52, 0x3B, 0xD6, 0xB3,
+    0x29, 0xE3, 0x2F, 0x84, 0x53, 0xD1, 0x00, 0xED, 0x20, 0xFC, 0xB1, 0x5B, 0x6A, 0xCB, 0xBE, 0x39, 0x4A, 0x4C, 0x58,
+    0xCF, 0xD0, 0xEF, 0xAA, 0xFB, 0x43, 0x4D, 0x33, 0x85, 0x45, 0xF9, 0x02, 0x7F, 0x50, 0x3C, 0x9F, 0xA8, 0x51, 0xA3,
+    0x40, 0x8F, 0x92, 0x9D, 0x38, 0xF5, 0xBC, 0xB6, 0xDA, 0x21, 0x10, 0xFF, 0xF3, 0xD2, 0xCD, 0x0C, 0x13, 0xEC, 0x5F,
+    0x97, 0x44, 0x17, 0xC4, 0xA7, 0x7E, 0x3D, 0x64, 0x5D, 0x19, 0x73, 0x60, 0x81, 0x4F, 0xDC, 0x22, 0x2A, 0x90, 0x88,
+    0x46, 0xEE, 0xB8, 0x14, 0xDE, 0x5E, 0x0B, 0xDB, 0xE0, 0x32, 0x3A, 0x0A, 0x49, 0x06, 0x24, 0x5C, 0xC2, 0xD3, 0xAC,
+    0x62, 0x91, 0x95, 0xE4, 0x79, 0xE7, 0xC8, 0x37, 0x6D, 0x8D, 0xD5, 0x4E, 0xA9, 0x6C, 0x56, 0xF4, 0xEA, 0x65, 0x7A,
+    0xAE, 0x08, 0xBA, 0x78, 0x25, 0x2E, 0x1C, 0xA6, 0xB4, 0xC6, 0xE8, 0xDD, 0x74, 0x1F, 0x4B, 0xBD, 0x8B, 0x8A, 0x70,
+    0x3E, 0xB5, 0x66, 0x48, 0x03, 0xF6, 0x0E, 0x61, 0x35, 0x57, 0xB9, 0x86, 0xC1, 0x1D, 0x9E, 0xE1, 0xF8, 0x98, 0x11,
+    0x69, 0xD9, 0x8E, 0x94, 0x9B, 0x1E, 0x87, 0xE9, 0xCE, 0x55, 0x28, 0xDF, 0x8C, 0xA1, 0x89, 0x0D, 0xBF, 0xE6, 0x42,
+    0x68, 0x41, 0x99, 0x2D, 0x0F, 0xB0, 0x54, 0xBB, 0x16,
+};
+
+static const uint8_t sem_aes_inv_sbox[256] = {
+    0x52, 0x09, 0x6A, 0xD5, 0x30, 0x36, 0xA5, 0x38, 0xBF, 0x40, 0xA3, 0x9E, 0x81, 0xF3, 0xD7, 0xFB, 0x7C, 0xE3, 0x39,
+    0x82, 0x9B, 0x2F, 0xFF, 0x87, 0x34, 0x8E, 0x43, 0x44, 0xC4, 0xDE, 0xE9, 0xCB, 0x54, 0x7B, 0x94, 0x32, 0xA6, 0xC2,
+    0x23, 0x3D, 0xEE, 0x4C, 0x95, 0x0B, 0x42, 0xFA, 0xC3, 0x4E, 0x08, 0x2E, 0xA1, 0x66, 0x28, 0xD9, 0x24, 0xB2, 0x76,
+    0x5B, 0xA2, 0x49, 0x6D, 0x8B, 0xD1, 0x25, 0x72, 0xF8, 0xF6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xD4, 0xA4, 0x5C, 0xCC,
+    0x5D, 0x65, 0xB6, 0x92, 0x6C, 0x70, 0x48, 0x50, 0xFD, 0xED, 0xB9, 0xDA, 0x5E, 0x15, 0x46, 0x57, 0xA7, 0x8D, 0x9D,
+    0x84, 0x90, 0xD8, 0xAB, 0x00, 0x8C, 0xBC, 0xD3, 0x0A, 0xF7, 0xE4, 0x58, 0x05, 0xB8, 0xB3, 0x45, 0x06, 0xD0, 0x2C,
+    0x1E, 0x8F, 0xCA, 0x3F, 0x0F, 0x02, 0xC1, 0xAF, 0xBD, 0x03, 0x01, 0x13, 0x8A, 0x6B, 0x3A, 0x91, 0x11, 0x41, 0x4F,
+    0x67, 0xDC, 0xEA, 0x97, 0xF2, 0xCF, 0xCE, 0xF0, 0xB4, 0xE6, 0x73, 0x96, 0xAC, 0x74, 0x22, 0xE7, 0xAD, 0x35, 0x85,
+    0xE2, 0xF9, 0x37, 0xE8, 0x1C, 0x75, 0xDF, 0x6E, 0x47, 0xF1, 0x1A, 0x71, 0x1D, 0x29, 0xC5, 0x89, 0x6F, 0xB7, 0x62,
+    0x0E, 0xAA, 0x18, 0xBE, 0x1B, 0xFC, 0x56, 0x3E, 0x4B, 0xC6, 0xD2, 0x79, 0x20, 0x9A, 0xDB, 0xC0, 0xFE, 0x78, 0xCD,
+    0x5A, 0xF4, 0x1F, 0xDD, 0xA8, 0x33, 0x88, 0x07, 0xC7, 0x31, 0xB1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xEC, 0x5F, 0x60,
+    0x51, 0x7F, 0xA9, 0x19, 0xB5, 0x4A, 0x0D, 0x2D, 0xE5, 0x7A, 0x9F, 0x93, 0xC9, 0x9C, 0xEF, 0xA0, 0xE0, 0x3B, 0x4D,
+    0xAE, 0x2A, 0xF5, 0xB0, 0xC8, 0xEB, 0xBB, 0x3C, 0x83, 0x53, 0x99, 0x61, 0x17, 0x2B, 0x04, 0x7E, 0xBA, 0x77, 0xD6,
+    0x26, 0xE1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0C, 0x7D,
+};
+
+/* GF(2^8) multiplication by 2. */
+static inline uint8_t sem_aes_xtime(uint8_t x) { return (uint8_t)((x << 1) ^ ((x & 0x80) != 0 ? 0x1B : 0)); }
+
+static inline uint8_t sem_aes_mul(uint8_t x, uint8_t y) {
+    uint8_t r = 0;
+    while (y != 0) {
+        if ((y & 1) != 0) {
+            r ^= x;
+        }
+        x = sem_aes_xtime(x);
+        y >>= 1;
+    }
+    return r;
+}
+
+/* AESE (Vd = SubBytes(ShiftRows(Vd ^ Vn))) and AESD (the inverses). The state is column-major:
+   byte r + 4c is row r of column c. */
+static inline void sem_aes_round(BiwaCpu* cpu, bool decrypt, unsigned d, unsigned n) {
+    static const uint8_t shift[16] = {0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11};
+    static const uint8_t inv_shift[16] = {0, 13, 10, 7, 4, 1, 14, 11, 8, 5, 2, 15, 12, 9, 6, 3};
+    const SemVec a = sem_vread(cpu, d);
+    const SemVec b = sem_vread(cpu, n);
+    uint8_t x[16];
+    for (unsigned i = 0; i < 16; ++i) {
+        x[i] = (uint8_t)(a.b[i] ^ b.b[i]);
+    }
+    SemVec r;
+    for (unsigned i = 0; i < 16; ++i) {
+        r.b[i] = decrypt ? sem_aes_inv_sbox[x[inv_shift[i]]] : sem_aes_sbox[x[shift[i]]];
+    }
+    sem_vwrite(cpu, d, &r, true);
+}
+
+/* AESMC (MixColumns) and AESIMC (InvMixColumns) of Vn. */
+static inline void sem_aes_mix(BiwaCpu* cpu, bool inverse, unsigned d, unsigned n) {
+    const SemVec a = sem_vread(cpu, n);
+    const uint8_t m[4] = {2, 3, 1, 1};
+    const uint8_t im[4] = {14, 11, 13, 9};
+    SemVec r;
+    for (unsigned c = 0; c < 4; ++c) {
+        for (unsigned row = 0; row < 4; ++row) {
+            uint8_t v = 0;
+            for (unsigned k = 0; k < 4; ++k) {
+                const uint8_t coefficient = inverse ? im[(k - row) & 3] : m[(k - row) & 3];
+                v ^= sem_aes_mul(a.b[4 * c + k], coefficient);
+            }
+            r.b[4 * c + row] = v;
+        }
+    }
+    sem_vwrite(cpu, d, &r, true);
+}
+
+static inline uint32_t sem_rol32(uint32_t x, unsigned k) { return (x << k) | (x >> ((32 - k) & 31)); }
+static inline uint32_t sem_ror32(uint32_t x, unsigned k) { return (x >> k) | (x << ((32 - k) & 31)); }
+
+/* 128-bit values as four 32-bit words, word 0 lowest. */
+typedef struct SemWords {
+    uint32_t w[4];
+} SemWords;
+
+static inline SemWords sem_words(const BiwaCpu* cpu, unsigned n) {
+    const SemVec v = sem_vread(cpu, n);
+    SemWords r;
+    for (unsigned i = 0; i < 4; ++i) {
+        r.w[i] = (uint32_t)sem_lane(&v, i, 4);
+    }
+    return r;
+}
+
+static inline void sem_set_words(BiwaCpu* cpu, unsigned d, const SemWords* x, unsigned count) {
+    SemVec v = {{0}};
+    for (unsigned i = 0; i < count; ++i) {
+        sem_set_lane(&v, i, 4, x->w[i]);
+    }
+    sem_vwrite(cpu, d, &v, count > 2);
+}
+
+enum { SEM_SHA1C, SEM_SHA1P, SEM_SHA1M };
+
+/* SHA1C, SHA1P, SHA1M: four rounds on abcd (Qd) and e (Sn) with W + K (Vm). */
+static inline void sem_sha1_hash(BiwaCpu* cpu, unsigned op, unsigned d, unsigned n, unsigned m) {
+    SemWords x = sem_words(cpu, d);
+    uint32_t y = (uint32_t)sem_v_get(cpu, n, 4);
+    const SemWords w = sem_words(cpu, m);
+    for (unsigned e = 0; e < 4; ++e) {
+        const uint32_t b = x.w[1];
+        const uint32_t c = x.w[2];
+        const uint32_t dd = x.w[3];
+        uint32_t t = 0;
+        switch (op) {
+            case SEM_SHA1C:
+                t = ((c ^ dd) & b) ^ dd;
+                break;
+            case SEM_SHA1P:
+                t = b ^ c ^ dd;
+                break;
+            default:
+                t = (b & c) | ((b | c) & dd);
+                break;
+        }
+        y = y + sem_rol32(x.w[0], 5) + t + w.w[e];
+        x.w[1] = sem_rol32(x.w[1], 30);
+        /* (Y : X) rotated left by 32 bits */
+        const uint32_t top = x.w[3];
+        x.w[3] = x.w[2];
+        x.w[2] = x.w[1];
+        x.w[1] = x.w[0];
+        x.w[0] = y;
+        y = top;
+    }
+    sem_set_words(cpu, d, &x, 4);
+}
+
+/* SHA1H: Sn rotated left by 30. */
+static inline void sem_sha1h(BiwaCpu* cpu, unsigned d, unsigned n) {
+    const SemWords x = {{sem_rol32((uint32_t)sem_v_get(cpu, n, 4), 30), 0, 0, 0}};
+    sem_set_words(cpu, d, &x, 1);
+}
+
+/* SHA1SU0 and SHA1SU1: the message schedule. */
+static inline void sem_sha1su0(BiwaCpu* cpu, unsigned d, unsigned n, unsigned m) {
+    const SemWords a = sem_words(cpu, d);
+    const SemWords b = sem_words(cpu, n);
+    const SemWords c = sem_words(cpu, m);
+    const SemWords t = {{a.w[2], a.w[3], b.w[0], b.w[1]}};
+    SemWords r;
+    for (unsigned i = 0; i < 4; ++i) {
+        r.w[i] = t.w[i] ^ a.w[i] ^ c.w[i];
+    }
+    sem_set_words(cpu, d, &r, 4);
+}
+
+static inline void sem_sha1su1(BiwaCpu* cpu, unsigned d, unsigned n) {
+    const SemWords x = sem_words(cpu, d);
+    const SemWords y = sem_words(cpu, n);
+    const SemWords t = {{x.w[0] ^ y.w[1], x.w[1] ^ y.w[2], x.w[2] ^ y.w[3], x.w[3]}};
+    const SemWords r = {{sem_rol32(t.w[0], 1), sem_rol32(t.w[1], 1), sem_rol32(t.w[2], 1),
+                         sem_rol32(t.w[3], 1) ^ sem_rol32(t.w[0], 2)}};
+    sem_set_words(cpu, d, &r, 4);
+}
+
+/* SHA256H (`part1`: X = Qd, Y = Qn, result X) and SHA256H2 (X = Qn, Y = Qd, result Y). */
+static inline void sem_sha256_hash(BiwaCpu* cpu, bool part1, unsigned d, unsigned n, unsigned m) {
+    SemWords x = sem_words(cpu, part1 ? d : n);
+    SemWords y = sem_words(cpu, part1 ? n : d);
+    const SemWords w = sem_words(cpu, m);
+    for (unsigned e = 0; e < 4; ++e) {
+        const uint32_t chs = ((y.w[1] ^ y.w[2]) & y.w[0]) ^ y.w[2];
+        const uint32_t maj = (x.w[0] & x.w[1]) | ((x.w[0] | x.w[1]) & x.w[2]);
+        const uint32_t sigma1 = sem_ror32(y.w[0], 6) ^ sem_ror32(y.w[0], 11) ^ sem_ror32(y.w[0], 25);
+        const uint32_t sigma0 = sem_ror32(x.w[0], 2) ^ sem_ror32(x.w[0], 13) ^ sem_ror32(x.w[0], 22);
+        const uint32_t t = y.w[3] + sigma1 + chs + w.w[e];
+        x.w[3] = t + x.w[3];
+        y.w[3] = t + sigma0 + maj;
+        /* (Y : X) rotated left by 32 bits */
+        const uint32_t x_top = x.w[3];
+        const uint32_t y_top = y.w[3];
+        for (unsigned k = 3; k > 0; --k) {
+            x.w[k] = x.w[k - 1];
+            y.w[k] = y.w[k - 1];
+        }
+        x.w[0] = y_top;
+        y.w[0] = x_top;
+    }
+    sem_set_words(cpu, d, part1 ? &x : &y, 4);
+}
+
+/* SHA256SU0 and SHA256SU1: the message schedule. */
+static inline void sem_sha256su0(BiwaCpu* cpu, unsigned d, unsigned n) {
+    const SemWords a = sem_words(cpu, d);
+    const SemWords b = sem_words(cpu, n);
+    const SemWords t = {{a.w[1], a.w[2], a.w[3], b.w[0]}};
+    SemWords r;
+    for (unsigned i = 0; i < 4; ++i) {
+        r.w[i] = (sem_ror32(t.w[i], 7) ^ sem_ror32(t.w[i], 18) ^ (t.w[i] >> 3)) + a.w[i];
+    }
+    sem_set_words(cpu, d, &r, 4);
+}
+
+static inline void sem_sha256su1(BiwaCpu* cpu, unsigned d, unsigned n, unsigned m) {
+    const SemWords a = sem_words(cpu, d);
+    const SemWords b = sem_words(cpu, n);
+    const SemWords c = sem_words(cpu, m);
+    const SemWords t0 = {{b.w[1], b.w[2], b.w[3], c.w[0]}};
+    SemWords r;
+    for (unsigned i = 0; i < 4; ++i) {
+        const uint32_t elt = i < 2 ? c.w[2 + i] : r.w[i - 2];
+        r.w[i] = (sem_ror32(elt, 17) ^ sem_ror32(elt, 19) ^ (elt >> 10)) + a.w[i] + t0.w[i];
+    }
+    sem_set_words(cpu, d, &r, 4);
+}
+
 #ifdef __cplusplus
 }
 #pragma clang diagnostic pop
