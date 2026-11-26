@@ -350,13 +350,46 @@ TEST(A64InterpreterTest, RunsFloatingPointArithmeticAsTheA57) {
     EXPECT_EQ(cpu.fpsr, SEM_FPSR_IOC);
 }
 
+TEST(A64InterpreterTest, RunsFloatingPointConversions) {
+    BiwaCpu cpu = Cpu();
+    // fcvtzs w0, d1: 2^31 saturates (IOC); 2^31 - 0.5 truncates (IXC).
+    RunFp(cpu, 0x1E780020, 0, 0x41E0000000000000, 0);
+    EXPECT_EQ(cpu.x[0], 0x7FFFFFFFu);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_IOC);
+    RunFp(cpu, 0x1E780020, 0, 0x41DFFFFFFFE00000, 0);
+    EXPECT_EQ(cpu.x[0], 0x7FFFFFFFu);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_IXC);
+    // fcvtzu w0, d1: -0.5 truncates to 0 (IXC), -1 saturates to 0 (IOC).
+    RunFp(cpu, 0x1E790020, 0, 0xBFE0000000000000, 0);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_IXC);
+    RunFp(cpu, 0x1E790020, 0, 0xBFF0000000000000, 0);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_IOC);
+    // frinta d0, d1: ties away from zero; -0.4 gives -0.
+    EXPECT_EQ(RunFp(cpu, 0x1E664020, 0, 0x4004000000000000, 0), 0x4008000000000000u);
+    EXPECT_EQ(RunFp(cpu, 0x1E664020, 0, 0xBFD999999999999A, 0), 0x8000000000000000u);
+    // fcvt h0, s1: 65520 rounds to infinity in IEEE half precision, to 65536 in the alternative one.
+    EXPECT_EQ(RunFp(cpu, 0x1E23C020, 0, 0x477FF000, 0) & 0xFFFF, 0x7C00u);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_OFC | SEM_FPSR_IXC);
+    EXPECT_EQ(RunFp(cpu, 0x1E23C020, SEM_FPCR_AHP, 0x477FF000, 0) & 0xFFFF, 0x7C00u);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_IXC);
+    // fcvt s0, h1: the alternative format's largest value.
+    EXPECT_EQ(RunFp(cpu, 0x1EE24020, SEM_FPCR_AHP, 0x7FFF, 0), 0x47FFE000u);
+    // scvtf d0, x1: 2^53 + 1 rounds to even.
+    cpu.x[1] = 0x0020000000000001;
+    sem_fp_enter(&cpu);
+    ASSERT_EQ(Step(cpu, 0x9E620020), StepResult::kOk);
+    sem_fp_fold(&cpu);
+    EXPECT_EQ(Low(cpu, 0), 0x4340000000000000u);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_IXC);
+}
+
 TEST(A64InterpreterTest, RejectsWhatItCannotRun) {
     BiwaCpu cpu = Cpu();
     EXPECT_EQ(Step(cpu, 0x91800000), StepResult::kUndefined);       // add with a reserved shift
     EXPECT_EQ(Step(cpu, 0x8BC20020), StepResult::kUndefined);       // add (shifted) with ror
     EXPECT_EQ(Step(cpu, 0x5AC00C20), StepResult::kUndefined);       // rev with the 64-bit opc on w
     EXPECT_EQ(Step(cpu, 0x00000000), StepResult::kUndefined);       // udf
-    EXPECT_EQ(Step(cpu, 0x1E380020), StepResult::kNotImplemented);  // fcvtzs w0, s1, not yet
+    EXPECT_EQ(Step(cpu, 0x4EA28420), StepResult::kNotImplemented);  // add v0.4s, v1.4s, v2.4s, not yet
     EXPECT_EQ(cpu.pc, 0x1000u);
 }
 

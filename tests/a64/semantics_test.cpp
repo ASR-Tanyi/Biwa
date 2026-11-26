@@ -159,8 +159,9 @@ TEST_P(SemanticsTest, MatchesUnicorn) {
 }
 
 // Hand-picked FP operands that random states rarely produce (tininess on either side of the
-// smallest normal, invalid operations, signed zeros, NaN rules), each under several FPCR settings,
-// against Unicorn. Registers: d0 = op(d1, d2) or d3 + d1 * d2 (s0 ... for single precision).
+// smallest normal, invalid operations, signed zeros, NaN rules, saturation, ties, half precision),
+// each under several FPCR settings, against Unicorn. Registers: d0 = op(d1, d2) or d3 + d1 * d2
+// (s0 ... for single precision); conversions read d1 or x1 and write d0 or x0.
 struct FpCase {
     std::uint32_t word;
     std::uint64_t n;
@@ -180,6 +181,24 @@ constexpr std::uint32_t kFmaxD = 0x1E624820;
 constexpr std::uint32_t kFminD = 0x1E625820;
 constexpr std::uint32_t kFmaxnmD = 0x1E626820;
 constexpr std::uint32_t kFnmulD = 0x1E628820;
+constexpr std::uint32_t kFcvtzsWD = 0x1E780020;
+constexpr std::uint32_t kFcvtzsXD = 0x9E780020;
+constexpr std::uint32_t kFcvtzuWD = 0x1E790020;
+constexpr std::uint32_t kFcvtnsXD = 0x9E600020;
+constexpr std::uint32_t kFcvtasWS = 0x1E240020;
+constexpr std::uint32_t kFcvtmsWD = 0x1E700020;
+constexpr std::uint32_t kFcvtpuWD = 0x1E690020;
+constexpr std::uint32_t kFcvtzsWD32 = 0x1E588020;  // fixed point, 32 fraction bits
+constexpr std::uint32_t kScvtfDX = 0x9E620020;
+constexpr std::uint32_t kUcvtfSX = 0x9E230020;
+constexpr std::uint32_t kUcvtfDW3 = 0x1E43F420;  // fixed point, 3 fraction bits
+constexpr std::uint32_t kFrintaD = 0x1E664020;
+constexpr std::uint32_t kFrintxD = 0x1E674020;
+constexpr std::uint32_t kFcvtHS = 0x1E23C020;
+constexpr std::uint32_t kFcvtSH = 0x1EE24020;
+constexpr std::uint32_t kFcvtSD = 0x1E624020;
+constexpr std::uint32_t kFcvtHD = 0x1E63C020;
+constexpr std::uint32_t kFcvtDH = 0x1EE2C020;
 
 constexpr std::array kFpCases = {
     // Just below the smallest normal before rounding, rounded up to it: tiny on ARM, not on x86.
@@ -212,9 +231,61 @@ constexpr std::array kFpCases = {
     FpCase{kFmaxnmD, 0x7FF8000000000005, 0x3FF0000000000000, 0},
     FpCase{kFmaxnmD, 0x7FF0000000000005, 0x3FF0000000000000, 0},
     FpCase{kFmaxD, 0x7FF8000000000005, 0x3FF0000000000000, 0},
+    // To integer: saturation at both ends, ties, negative values to unsigned, fixed point.
+    FpCase{kFcvtzsWD, 0x41E0000000000000, 0, 0},
+    FpCase{kFcvtzsWD, 0x41DFFFFFFFE00000, 0, 0},
+    FpCase{kFcvtzsWD, 0xC1E0000000000000, 0, 0},
+    FpCase{kFcvtzsWD, 0xC1E0000000200000, 0, 0},
+    FpCase{kFcvtzsXD, 0x43E0000000000000, 0, 0},
+    FpCase{kFcvtzsXD, 0xC3E0000000000000, 0, 0},
+    FpCase{kFcvtzuWD, 0xBFE0000000000000, 0, 0},
+    FpCase{kFcvtzuWD, 0xBFF0000000000000, 0, 0},
+    FpCase{kFcvtzuWD, 0x41EFFFFFFFF00000, 0, 0},
+    FpCase{kFcvtzuWD, 0x41F0000000000000, 0, 0},
+    FpCase{kFcvtnsXD, 0x4004000000000000, 0, 0},
+    FpCase{kFcvtnsXD, 0x400C000000000000, 0, 0},
+    FpCase{kFcvtnsXD, 0xC004000000000000, 0, 0},
+    FpCase{kFcvtasWS, 0x40200000, 0, 0},
+    FpCase{kFcvtasWS, 0xC0200000, 0, 0},
+    FpCase{kFcvtmsWD, 0xBFE0000000000000, 0, 0},
+    FpCase{kFcvtpuWD, 0x3FB999999999999A, 0, 0},
+    FpCase{kFcvtzsWD32, 0x3FE0000000000000, 0, 0},
+    FpCase{kFcvtzsWD32, 0xBFE0000000000000, 0, 0},
+    FpCase{kFcvtzsWD, 0x7FF0000000000001, 0, 0},
+    // From integer (x1 holds the same bits as d1).
+    FpCase{kScvtfDX, 0x0020000000000001, 0, 0},
+    FpCase{kScvtfDX, 0x8000000000000001, 0, 0},
+    FpCase{kUcvtfSX, 0xFFFFFFFFFFFFFFFF, 0, 0},
+    FpCase{kUcvtfSX, 0x0000000001000001, 0, 0},
+    FpCase{kUcvtfDW3, 0xFFFFFFFF00000007, 0, 0},
+    // Round to integral.
+    FpCase{kFrintaD, 0x4004000000000000, 0, 0},
+    FpCase{kFrintaD, 0xBFE0000000000000, 0, 0},
+    FpCase{kFrintaD, 0xBFD999999999999A, 0, 0},
+    FpCase{kFrintxD, 0x4004000000000000, 0, 0},
+    FpCase{kFrintxD, 0x0000000000000001, 0, 0},
+    // Precision: half overflow and AHP, half tininess, NaNs, the single tininess boundary.
+    FpCase{kFcvtHS, 0x477FF000, 0, 0},
+    FpCase{kFcvtHS, 0x477FE000, 0, 0},
+    FpCase{kFcvtHS, 0x33000000, 0, 0},
+    FpCase{kFcvtHS, 0x33400000, 0, 0},
+    FpCase{kFcvtHS, 0x7F800000, 0, 0},
+    FpCase{kFcvtHS, 0x7FA00001, 0, 0},
+    FpCase{kFcvtHS, 0x38800000, 0, 0},
+    FpCase{kFcvtSH, 0x7C01, 0, 0},
+    FpCase{kFcvtSH, 0x7FFF, 0, 0},
+    FpCase{kFcvtSH, 0xFC00, 0, 0},
+    FpCase{kFcvtSH, 0x0001, 0, 0},
+    FpCase{kFcvtDH, 0x83FF, 0, 0},
+    FpCase{kFcvtHD, 0x40EFFE0000000001, 0, 0},
+    FpCase{kFcvtHD, 0x7FF0000000000123, 0, 0},
+    FpCase{kFcvtSD, 0x36A8000000000000, 0, 0},
+    FpCase{kFcvtSD, 0x380FFFFFFF000000, 0, 0},
+    FpCase{kFcvtSD, 0x7FF0000000000123, 0, 0},
+    FpCase{kFcvtSD, 0x47F0000000000000, 0, 0},
 };
 
-// FPCR: nearest, +inf, -inf, zero; with FZ; with DN; all three.
+// FPCR: nearest, +inf, -inf, zero; with FZ; with DN; AHP, DN and FZ rounding down.
 constexpr std::array<std::uint32_t, 8> kFpcrs = {
     0, 1u << 22, 2u << 22, 3u << 22, 1u << 24, (1u << 24) | (1u << 22), 1u << 25, (7u << 24) | (2u << 22)};
 
@@ -229,6 +300,7 @@ TEST(DirectedFpTest, MatchesUnicorn) {
                 const std::uint64_t value = i == 1 ? c.n : i == 2 ? c.m : i == 3 ? c.a : 0x5555555555555555;
                 std::memcpy(in.v[i].data(), &value, 8);
             }
+            in.x[1] = c.n;
             BiwaCpu cpu = biwa::test::ToBiwa(in);
             ASSERT_EQ(GuestStep(cpu, c.word), StepResult::kOk);
             const UnicornCpu::Outcome reference = unicorn.Run(in, std::array<std::uint32_t, 1>{c.word});
@@ -618,6 +690,17 @@ INSTANTIATE_TEST_SUITE_P(FloatArithmetic, SemanticsTest,
                                          Op::FNMUL_float, Op::FSQRT_float, Op::FMAX_float, Op::FMIN_float,
                                          Op::FMAXNM_float, Op::FMINNM_float, Op::FMADD_float, Op::FMSUB_float,
                                          Op::FNMADD_float, Op::FNMSUB_float),
+                         Name);
+
+// Floating point: conversions.
+INSTANTIATE_TEST_SUITE_P(FloatConversions, SemanticsTest,
+                         testing::Values(Op::FRINTN_float, Op::FRINTP_float, Op::FRINTM_float, Op::FRINTZ_float,
+                                         Op::FRINTA_float, Op::FRINTX_float, Op::FRINTI_float, Op::FCVT_float,
+                                         Op::SCVTF_float_fix, Op::UCVTF_float_fix, Op::FCVTZS_float_fix,
+                                         Op::FCVTZU_float_fix, Op::FCVTNS_float, Op::FCVTNU_float, Op::SCVTF_float_int,
+                                         Op::UCVTF_float_int, Op::FCVTAS_float, Op::FCVTAU_float, Op::FCVTPS_float,
+                                         Op::FCVTPU_float, Op::FCVTMS_float, Op::FCVTMU_float, Op::FCVTZS_float_int,
+                                         Op::FCVTZU_float_int),
                          Name);
 
 }  // namespace

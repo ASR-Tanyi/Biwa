@@ -1112,14 +1112,17 @@ static inline uint64_t sem_fp_process_nans(BiwaCpu* cpu, bool dbl, uint64_t a, u
     return sem_fp_default_nan(dbl);
 }
 
-enum { SEM_FP_ADD, SEM_FP_SUB, SEM_FP_MUL, SEM_FP_DIV, SEM_FP_SQRT, SEM_FP_MULADD };
+enum { SEM_FP_ADD, SEM_FP_SUB, SEM_FP_MUL, SEM_FP_DIV, SEM_FP_SQRT, SEM_FP_MULADD, SEM_FP_NARROW };
 
-/* The host operation (MULADD: a * b + c, fused), rounded in the host's rounding mode and raising
-   the host's flags. FENV_ACCESS keeps the compiler from folding it or moving it past changes of
-   the rounding mode or flags. */
+/* The host operation (MULADD: a * b + c, fused; NARROW: double a to single), rounded in the
+   host's rounding mode and raising the host's flags. FENV_ACCESS keeps the compiler from folding it
+   or moving it past changes of the rounding mode or flags. `dbl` is the result's precision. */
 static inline uint64_t sem_fp_host_op(bool dbl, unsigned op, uint64_t a, uint64_t b, uint64_t c) {
 #pragma STDC FENV_ACCESS ON
 #pragma clang fp contract(off)
+    if (op == SEM_FP_NARROW) {
+        return sem_f32_bits((float)sem_f64(a));
+    }
     if (dbl) {
         const double x = sem_f64(a);
         const double y = sem_f64(b);
@@ -1307,6 +1310,308 @@ static inline uint64_t sem_fp_max(BiwaCpu* cpu, bool dbl, uint64_t a, uint64_t b
         return x > y ? a : b;
     }
     return x < y ? a : b;
+}
+
+/* ---- Floating point: conversions ---- */
+
+/* Rounding: ARM's RMode values, then ties away from zero (FRINTA, FCVTA*). */
+enum { SEM_ROUND_NEAREST, SEM_ROUND_UP, SEM_ROUND_DOWN, SEM_ROUND_ZERO, SEM_ROUND_AWAY };
+
+static inline unsigned sem_fp_rounding(const BiwaCpu* cpu) { return (cpu->fpcr >> SEM_FPCR_RMODE_SHIFT) & 3; }
+
+/* Where the bits dropped by a right shift lie against half of the last kept bit. */
+enum { SEM_DROPPED_NONE, SEM_DROPPED_BELOW_HALF, SEM_DROPPED_HALF, SEM_DROPPED_ABOVE_HALF };
+
+/* m >> shift (0 when shift >= 64), and where the dropped bits lie. */
+static inline uint64_t sem_shift_right_rounding(uint64_t m, unsigned shift, unsigned* dropped) {
+    if (shift == 0) {
+        *dropped = SEM_DROPPED_NONE;
+        return m;
+    }
+    if (shift >= 64) {
+        *dropped = m == 0 ? SEM_DROPPED_NONE : SEM_DROPPED_BELOW_HALF; /* m < 2^53 <= half */
+        return 0;
+    }
+    const uint64_t rest = m & (((uint64_t)1 << shift) - 1);
+    const uint64_t half = (uint64_t)1 << (shift - 1);
+    *dropped = rest == 0      ? SEM_DROPPED_NONE
+               : rest < half  ? SEM_DROPPED_BELOW_HALF
+               : rest == half ? SEM_DROPPED_HALF
+                              : SEM_DROPPED_ABOVE_HALF;
+    return m >> shift;
+}
+
+/* Whether a magnitude rounds up by one, given its last kept bit and the dropped bits. */
+static inline bool sem_round_up(unsigned rounding, bool negative, bool odd, unsigned dropped) {
+    switch (rounding) {
+        case SEM_ROUND_NEAREST:
+            return dropped == SEM_DROPPED_ABOVE_HALF || (dropped == SEM_DROPPED_HALF && odd);
+        case SEM_ROUND_AWAY:
+            return dropped >= SEM_DROPPED_HALF;
+        case SEM_ROUND_UP:
+            return !negative && dropped != SEM_DROPPED_NONE;
+        case SEM_ROUND_DOWN:
+            return negative && dropped != SEM_DROPPED_NONE;
+        default:
+            return false;
+    }
+}
+
+/* A finite nonzero value as m * 2^e, m an integer below 2^53 (2^24 for single precision). */
+static inline void sem_fp_unpack(bool dbl, uint64_t x, uint64_t* m, int* e) {
+    if (dbl) {
+        const int exponent = (int)((x >> 52) & 0x7FF);
+        const uint64_t frac = x & 0xFFFFFFFFFFFFFu;
+        *m = exponent == 0 ? frac : frac | ((uint64_t)1 << 52);
+        *e = (exponent == 0 ? 1 : exponent) - 1075;
+    } else {
+        const int exponent = (int)((x >> 23) & 0xFF);
+        const uint64_t frac = x & 0x7FFFFFu;
+        *m = exponent == 0 ? frac : frac | ((uint64_t)1 << 23);
+        *e = (exponent == 0 ? 1 : exponent) - 150;
+    }
+}
+
+/* FCVT{N,A,P,M,Z}{S,U} (scalar) and FCVTZS / FCVTZU (fixed-point): x * 2^fbits rounded, then
+   saturated to `bits` (32 or 64) signed or unsigned. A NaN or an out-of-range value raises IOC
+   (a NaN gives 0), an inexact one IXC. Exact arithmetic: no host flags. */
+static inline uint64_t sem_fp_to_int(BiwaCpu* cpu, bool dbl, uint64_t x, unsigned fbits, unsigned rounding,
+                                     unsigned bits, bool is_unsigned) {
+    x = sem_fp_operand(cpu, dbl, x);
+    if (sem_fp_is_nan(dbl, x)) {
+        cpu->fpsr |= SEM_FPSR_IOC;
+        return 0;
+    }
+    const bool negative = (x & sem_fp_sign_bit(dbl)) != 0;
+    uint64_t magnitude = 0;
+    bool overflow = sem_fp_is_infinity(dbl, x);
+    bool inexact = false;
+    if (!overflow && !sem_fp_is_zero(dbl, x)) {
+        uint64_t m = 0;
+        int e = 0;
+        sem_fp_unpack(dbl, x, &m, &e);
+        e += (int)fbits;
+        if (e >= 0) {
+            overflow = e >= 64 || (m >> (63 - e)) > 1; /* m * 2^e needs more than 64 bits */
+            magnitude = overflow ? 0 : m << e;
+        } else {
+            unsigned dropped = SEM_DROPPED_NONE;
+            magnitude = sem_shift_right_rounding(m, (unsigned)-e, &dropped);
+            if (sem_round_up(rounding, negative, (magnitude & 1) != 0, dropped)) {
+                ++magnitude;
+            }
+            inexact = dropped != SEM_DROPPED_NONE;
+        }
+    }
+    const uint64_t top = (uint64_t)1 << (bits - 1);
+    if (!overflow) {
+        if (is_unsigned) {
+            overflow = (negative && magnitude != 0) || (bits == 32 && magnitude > 0xFFFFFFFFu);
+        } else {
+            overflow = magnitude > (negative ? top : top - 1);
+        }
+    }
+    const uint64_t mask = bits == 64 ? ~(uint64_t)0 : 0xFFFFFFFFu;
+    if (overflow) {
+        cpu->fpsr |= SEM_FPSR_IOC;
+        if (is_unsigned) {
+            return negative ? 0 : mask;
+        }
+        return (negative ? top : top - 1) & mask;
+    }
+    if (inexact) {
+        cpu->fpsr |= SEM_FPSR_IXC;
+    }
+    return (negative ? (uint64_t)0 - magnitude : magnitude) & mask;
+}
+
+/* SCVTF / UCVTF (scalar, integer and fixed-point): the integer in the low `bits` of `value`,
+   divided by 2^fbits, rounded once in the host's rounding mode (the scaling by a power of two is
+   exact: the result is never tiny). */
+static inline uint64_t sem_int_to_fp(bool dbl, uint64_t value, unsigned bits, bool is_unsigned, unsigned fbits) {
+#pragma STDC FENV_ACCESS ON
+#pragma clang fp contract(off)
+    const uint64_t scale_bits = (uint64_t)(1023 - fbits) << 52;
+    if (dbl) {
+        double r = 0;
+        if (is_unsigned) {
+            r = bits == 32 ? (double)(uint32_t)value : (double)value;
+        } else {
+            r = bits == 32 ? (double)(int32_t)(uint32_t)value : (double)(int64_t)value;
+        }
+        return sem_f64_bits(r * sem_f64(scale_bits));
+    }
+    float r = 0;
+    if (is_unsigned) {
+        r = bits == 32 ? (float)(uint32_t)value : (float)value;
+    } else {
+        r = bits == 32 ? (float)(int32_t)(uint32_t)value : (float)(int64_t)value;
+    }
+    return sem_f32_bits(r * (float)sem_f64(scale_bits));
+}
+
+/* FRINTN, FRINTP, FRINTM, FRINTZ, FRINTA (`rounding`), FRINTI and FRINTX (FPCR's rounding;
+   `exact` for FRINTX raises IXC when the value changes): the nearest integral value. A result of
+   zero keeps the operand's sign. Exact arithmetic: no host flags. */
+static inline uint64_t sem_fp_round_int(BiwaCpu* cpu, bool dbl, uint64_t x, unsigned rounding, bool exact) {
+    x = sem_fp_operand(cpu, dbl, x);
+    if (sem_fp_is_nan(dbl, x)) {
+        return sem_fp_process_nan(cpu, dbl, x);
+    }
+    const uint64_t sign = x & sem_fp_sign_bit(dbl);
+    if (sem_fp_is_infinity(dbl, x) || sem_fp_is_zero(dbl, x)) {
+        return x;
+    }
+    uint64_t m = 0;
+    int e = 0;
+    sem_fp_unpack(dbl, x, &m, &e);
+    if (e >= 0) {
+        return x; /* already integral */
+    }
+    unsigned dropped = SEM_DROPPED_NONE;
+    uint64_t n = sem_shift_right_rounding(m, (unsigned)-e, &dropped);
+    if (sem_round_up(rounding, sign != 0, (n & 1) != 0, dropped)) {
+        ++n;
+    }
+    if (exact && dropped != SEM_DROPPED_NONE) {
+        cpu->fpsr |= SEM_FPSR_IXC;
+    }
+    if (n == 0) {
+        return sign;
+    }
+    /* n < 2^53: exact as a double, and as a single when it came from one. */
+    return (dbl ? sem_f64_bits((double)n) : sem_f32_bits((float)n)) | sign;
+}
+
+/* FCVT between single and double precision. Widening is exact; narrowing rounds like arithmetic.
+   NaNs keep the top bits of their payload. */
+static inline uint64_t sem_fp_convert(BiwaCpu* cpu, bool from_dbl, uint64_t x) {
+    x = sem_fp_operand(cpu, from_dbl, x);
+    const bool to_dbl = !from_dbl;
+    if (sem_fp_is_nan(from_dbl, x)) {
+        if (sem_fp_is_snan(from_dbl, x)) {
+            cpu->fpsr |= SEM_FPSR_IOC;
+        }
+        if ((cpu->fpcr & SEM_FPCR_DN) != 0) {
+            return sem_fp_default_nan(to_dbl);
+        }
+        const uint64_t sign = (x & sem_fp_sign_bit(from_dbl)) != 0 ? sem_fp_sign_bit(to_dbl) : 0;
+        const uint64_t payload = from_dbl ? (x >> 29) & 0x3FFFFFu : (x & 0x3FFFFFu) << 29;
+        return sign | sem_fp_infinity(to_dbl) | sem_fp_quiet_bit(to_dbl) | payload;
+    }
+    if (to_dbl) {
+        return sem_f64_bits((double)sem_f32((uint32_t)x));
+    }
+    return sem_fp_arith(cpu, false, SEM_FP_NARROW, x, 0, 0);
+}
+
+/* FCVT to half precision: IEEE, or with FPCR.AHP the alternative format (no infinities or NaNs:
+   those raise IOC and give the largest value or zero; out-of-range values saturate with IOC).
+   Rounded in software; FZ does not apply to half precision on ARMv8.0. */
+static inline uint64_t sem_fp_to_half(BiwaCpu* cpu, bool dbl, uint64_t x) {
+    x = sem_fp_operand(cpu, dbl, x);
+    const bool ahp = (cpu->fpcr & SEM_FPCR_AHP) != 0;
+    const bool negative = (x & sem_fp_sign_bit(dbl)) != 0;
+    const uint64_t sign = negative ? 0x8000u : 0;
+    if (sem_fp_is_nan(dbl, x)) {
+        if (ahp || sem_fp_is_snan(dbl, x)) {
+            cpu->fpsr |= SEM_FPSR_IOC;
+        }
+        if (ahp) {
+            return sign;
+        }
+        if ((cpu->fpcr & SEM_FPCR_DN) != 0) {
+            return 0x7E00u;
+        }
+        return sign | 0x7E00u | (dbl ? (x >> 42) & 0x1FFu : (x >> 13) & 0x1FFu);
+    }
+    if (sem_fp_is_infinity(dbl, x)) {
+        if (ahp) {
+            cpu->fpsr |= SEM_FPSR_IOC;
+            return sign | 0x7FFFu;
+        }
+        return sign | 0x7C00u;
+    }
+    if (sem_fp_is_zero(dbl, x)) {
+        return sign;
+    }
+    uint64_t m = 0;
+    int e = 0;
+    sem_fp_unpack(dbl, x, &m, &e);
+    const int top = 63 - __builtin_clzll(m) + e; /* the value lies in [2^top, 2^(top + 1)) */
+    const bool tiny = top < -14;
+    int quantum = tiny ? -24 : top - 10;
+    unsigned dropped = SEM_DROPPED_NONE;
+    uint64_t n = 0;
+    if (quantum <= e) {
+        n = m << (e - quantum);
+    } else {
+        n = sem_shift_right_rounding(m, (unsigned)(quantum - e), &dropped);
+    }
+    if (sem_round_up(sem_fp_rounding(cpu), negative, (n & 1) != 0, dropped)) {
+        ++n;
+    }
+    const bool inexact = dropped != SEM_DROPPED_NONE;
+    uint64_t bits = 0;
+    if (tiny) {
+        bits = n; /* a denormal, or the smallest normal when it rounded up to 2^10 */
+    } else {
+        if (n == (uint64_t)1 << 11) {
+            n >>= 1;
+            ++quantum;
+        }
+        const int biased = quantum + 25;
+        if (biased > (ahp ? 31 : 30)) {
+            if (ahp) {
+                cpu->fpsr |= SEM_FPSR_IOC;
+                return sign | 0x7FFFu;
+            }
+            cpu->fpsr |= SEM_FPSR_OFC | SEM_FPSR_IXC;
+            const unsigned rounding = sem_fp_rounding(cpu);
+            const bool to_infinity = rounding == SEM_ROUND_NEAREST || (rounding == SEM_ROUND_UP && !negative) ||
+                                     (rounding == SEM_ROUND_DOWN && negative);
+            return sign | (to_infinity ? 0x7C00u : 0x7BFFu);
+        }
+        bits = ((uint64_t)biased << 10) | (n & 0x3FFu);
+    }
+    if (inexact) {
+        cpu->fpsr |= tiny ? SEM_FPSR_UFC | SEM_FPSR_IXC : SEM_FPSR_IXC;
+    }
+    return sign | bits;
+}
+
+/* FCVT from half precision (IEEE, or the alternative format with FPCR.AHP): exact. */
+static inline uint64_t sem_fp_from_half(BiwaCpu* cpu, bool dbl, uint64_t h) {
+    const bool negative = (h & 0x8000u) != 0;
+    const uint64_t sign = negative ? sem_fp_sign_bit(dbl) : 0;
+    const unsigned exponent = (unsigned)(h >> 10) & 31;
+    const uint64_t frac = h & 0x3FFu;
+    if (exponent == 31 && (cpu->fpcr & SEM_FPCR_AHP) == 0) {
+        if (frac == 0) {
+            return sign | sem_fp_infinity(dbl);
+        }
+        if ((frac & 0x200u) == 0) {
+            cpu->fpsr |= SEM_FPSR_IOC;
+        }
+        if ((cpu->fpcr & SEM_FPCR_DN) != 0) {
+            return sem_fp_default_nan(dbl);
+        }
+        const uint64_t payload = (frac & 0x1FFu) << (dbl ? 42 : 13);
+        return sign | sem_fp_infinity(dbl) | sem_fp_quiet_bit(dbl) | payload;
+    }
+    if (exponent == 0 && frac == 0) {
+        return sign;
+    }
+    /* m * 2^e with m < 2^11: build the double directly (always normal). */
+    const uint64_t m = exponent == 0 ? frac : frac | 0x400u;
+    const int e = (exponent == 0 ? 1 : (int)exponent) - 25;
+    const int top = 63 - __builtin_clzll(m);
+    const uint64_t mantissa = (m << (52 - top)) & 0xFFFFFFFFFFFFFu;
+    const uint64_t as_double = ((uint64_t)(top + e + 1023) << 52) | mantissa;
+    if (dbl) {
+        return sign | as_double;
+    }
+    return (negative ? sem_fp_sign_bit(false) : 0) | sem_f32_bits((float)sem_f64(as_double));
 }
 
 #ifdef __cplusplus

@@ -815,9 +815,113 @@ StepResult FpMoveGeneral(BiwaCpu& cpu, std::uint32_t word) {
     return StepResult::kOk;
 }
 
+// FCVT between single, double and half precision: source type in bits 23..22, destination in
+// bits 16..15 (0 single, 1 double, 3 half).
+StepResult FpConvertPrecision(BiwaCpu& cpu, std::uint32_t word) {
+    const std::uint32_t from = (word >> 22) & 3;
+    const std::uint32_t to = (word >> 15) & 3;
+    if (from == to || from == 2 || to == 2) {
+        return StepResult::kUndefined;
+    }
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t d = word & 31;
+    const unsigned from_bytes = from == 3 ? 2 : FpBytes(from == 1);
+    const unsigned to_bytes = to == 3 ? 2 : FpBytes(to == 1);
+    const std::uint64_t x = sem_v_get(&cpu, n, from_bytes);
+    std::uint64_t result = 0;
+    if (from == 3) {
+        result = sem_fp_from_half(&cpu, to == 1, x);
+    } else if (to == 3) {
+        result = sem_fp_to_half(&cpu, from == 1, x);
+    } else {
+        result = sem_fp_convert(&cpu, from == 1, x);
+    }
+    sem_v_set(&cpu, d, to_bytes, result);
+    return StepResult::kOk;
+}
+
+// Conversions between FP and integer or fixed point (sf in bit 31; for the fixed-point forms the
+// scale in bits 15..10, fbits = 64 - scale, at most 32 for W).
+StepResult FpConvertInteger(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    const std::optional<bool> precision = FpDouble(word);
+    if (!precision) {
+        return StepResult::kUndefined;  // half precision is ARMv8.2
+    }
+    const bool dbl = *precision;
+    const bool sf = (word >> 31) != 0;
+    const unsigned bits = sf ? 64 : 32;
+    const bool fixed = op == Op::SCVTF_float_fix || op == Op::UCVTF_float_fix || op == Op::FCVTZS_float_fix ||
+                       op == Op::FCVTZU_float_fix;
+    const std::uint32_t scale = (word >> 10) & 63;
+    if (fixed && !sf && scale < 32) {
+        return StepResult::kUndefined;
+    }
+    const unsigned fbits = fixed ? 64 - scale : 0;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t d = word & 31;
+    if (op == Op::SCVTF_float_int || op == Op::UCVTF_float_int || op == Op::SCVTF_float_fix ||
+        op == Op::UCVTF_float_fix) {
+        const bool is_unsigned = op == Op::UCVTF_float_int || op == Op::UCVTF_float_fix;
+        sem_v_set(&cpu, d, FpBytes(dbl), sem_int_to_fp(dbl, sem_x(&cpu, n), bits, is_unsigned, fbits));
+        return StepResult::kOk;
+    }
+    unsigned rounding = SEM_ROUND_ZERO;
+    bool is_unsigned = false;
+    switch (op) {
+        case Op::FCVTNS_float:
+        case Op::FCVTNU_float:
+            rounding = SEM_ROUND_NEAREST;
+            is_unsigned = op == Op::FCVTNU_float;
+            break;
+        case Op::FCVTAS_float:
+        case Op::FCVTAU_float:
+            rounding = SEM_ROUND_AWAY;
+            is_unsigned = op == Op::FCVTAU_float;
+            break;
+        case Op::FCVTPS_float:
+        case Op::FCVTPU_float:
+            rounding = SEM_ROUND_UP;
+            is_unsigned = op == Op::FCVTPU_float;
+            break;
+        case Op::FCVTMS_float:
+        case Op::FCVTMU_float:
+            rounding = SEM_ROUND_DOWN;
+            is_unsigned = op == Op::FCVTMU_float;
+            break;
+        default:  // FCVTZS, FCVTZU (integer and fixed-point)
+            is_unsigned = op == Op::FCVTZU_float_int || op == Op::FCVTZU_float_fix;
+            break;
+    }
+    const std::uint64_t x = sem_v_get(&cpu, n, FpBytes(dbl));
+    sem_set_x(&cpu, d, sem_fp_to_int(&cpu, dbl, x, fbits, rounding, bits, is_unsigned));
+    return StepResult::kOk;
+}
+
 StepResult FloatingPoint(BiwaCpu& cpu, Op op, std::uint32_t word) {
-    if (op == Op::FMOV_float_gen) {
-        return FpMoveGeneral(cpu, word);
+    switch (op) {
+        case Op::FMOV_float_gen:
+            return FpMoveGeneral(cpu, word);
+        case Op::FCVT_float:
+            return FpConvertPrecision(cpu, word);
+        case Op::SCVTF_float_fix:
+        case Op::UCVTF_float_fix:
+        case Op::FCVTZS_float_fix:
+        case Op::FCVTZU_float_fix:
+        case Op::FCVTNS_float:
+        case Op::FCVTNU_float:
+        case Op::SCVTF_float_int:
+        case Op::UCVTF_float_int:
+        case Op::FCVTAS_float:
+        case Op::FCVTAU_float:
+        case Op::FCVTPS_float:
+        case Op::FCVTPU_float:
+        case Op::FCVTMS_float:
+        case Op::FCVTMU_float:
+        case Op::FCVTZS_float_int:
+        case Op::FCVTZU_float_int:
+            return FpConvertInteger(cpu, op, word);
+        default:
+            break;
     }
     const std::optional<bool> precision = FpDouble(word);
     if (!precision) {
@@ -872,6 +976,23 @@ StepResult FloatingPoint(BiwaCpu& cpu, Op op, std::uint32_t word) {
         case Op::FSQRT_float:
             sem_v_set(&cpu, d, bytes, sem_fp_sqrt(&cpu, dbl, sem_v_get(&cpu, n, bytes)));
             break;
+        case Op::FRINTN_float:
+        case Op::FRINTP_float:
+        case Op::FRINTM_float:
+        case Op::FRINTZ_float:
+        case Op::FRINTA_float:
+        case Op::FRINTX_float:
+        case Op::FRINTI_float: {
+            const unsigned rounding = op == Op::FRINTN_float   ? SEM_ROUND_NEAREST
+                                      : op == Op::FRINTP_float ? SEM_ROUND_UP
+                                      : op == Op::FRINTM_float ? SEM_ROUND_DOWN
+                                      : op == Op::FRINTZ_float ? SEM_ROUND_ZERO
+                                      : op == Op::FRINTA_float ? SEM_ROUND_AWAY
+                                                               : sem_fp_rounding(&cpu);
+            sem_v_set(&cpu, d, bytes,
+                      sem_fp_round_int(&cpu, dbl, sem_v_get(&cpu, n, bytes), rounding, op == Op::FRINTX_float));
+            break;
+        }
         case Op::FMAX_float:
         case Op::FMIN_float:
         case Op::FMAXNM_float:
@@ -996,6 +1117,30 @@ StepResult System(BiwaCpu& cpu, Op op, std::uint32_t word) {
         case Op::FMSUB_float:
         case Op::FNMADD_float:
         case Op::FNMSUB_float:
+        case Op::FRINTN_float:
+        case Op::FRINTP_float:
+        case Op::FRINTM_float:
+        case Op::FRINTZ_float:
+        case Op::FRINTA_float:
+        case Op::FRINTX_float:
+        case Op::FRINTI_float:
+        case Op::FCVT_float:
+        case Op::SCVTF_float_fix:
+        case Op::UCVTF_float_fix:
+        case Op::FCVTZS_float_fix:
+        case Op::FCVTZU_float_fix:
+        case Op::FCVTNS_float:
+        case Op::FCVTNU_float:
+        case Op::SCVTF_float_int:
+        case Op::UCVTF_float_int:
+        case Op::FCVTAS_float:
+        case Op::FCVTAU_float:
+        case Op::FCVTPS_float:
+        case Op::FCVTPU_float:
+        case Op::FCVTMS_float:
+        case Op::FCVTMU_float:
+        case Op::FCVTZS_float_int:
+        case Op::FCVTZU_float_int:
             return FloatingPoint(cpu, op, word);
         default:
             return LoadStore(cpu, op, word);
