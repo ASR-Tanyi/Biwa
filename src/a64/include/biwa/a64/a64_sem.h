@@ -15,6 +15,12 @@
 
 #include "biwa/a64/cpu.h"
 
+#if defined(__x86_64__)
+#include <xmmintrin.h>
+#else
+#include <fenv.h>
+#endif
+
 #ifdef __cplusplus
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wold-style-cast"
@@ -536,6 +542,31 @@ static inline void sem_copy_in(void* host, uint64_t address, unsigned bytes) {
 static inline void sem_copy_out(uint64_t address, const void* host, unsigned bytes) {
     __builtin_memcpy(sem_host(address), host, bytes);
 }
+
+/* Bit patterns and host floating-point values. */
+static inline float sem_f32(uint32_t bits) {
+    float value = 0;
+    __builtin_memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static inline double sem_f64(uint64_t bits) {
+    double value = 0;
+    __builtin_memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static inline uint32_t sem_f32_bits(float value) {
+    uint32_t bits = 0;
+    __builtin_memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static inline uint64_t sem_f64_bits(double value) {
+    uint64_t bits = 0;
+    __builtin_memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
 /* NOLINTEND(clang-analyzer-unix.cstring.NullArg) */
 /* NOLINTEND(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
 /* NOLINTEND(performance-no-int-to-ptr) */
@@ -873,6 +904,173 @@ static inline void sem_ldar(BiwaCpu* cpu, unsigned size, unsigned t, uint64_t ad
 
 static inline void sem_stlr(const BiwaCpu* cpu, unsigned size, unsigned t, uint64_t address) {
     sem_write_release(address, 1u << size, sem_x(cpu, t));
+}
+
+/* ---- Floating point: environment, moves and compares ---- */
+
+/* FPCR and FPSR fields. */
+#define SEM_FPCR_AHP (1u << 26)
+#define SEM_FPCR_DN (1u << 25)
+#define SEM_FPCR_FZ (1u << 24)
+#define SEM_FPCR_RMODE_SHIFT 22
+#define SEM_FPSR_IOC 0x01u
+#define SEM_FPSR_DZC 0x02u
+#define SEM_FPSR_OFC 0x04u
+#define SEM_FPSR_UFC 0x08u
+#define SEM_FPSR_IXC 0x10u
+#define SEM_FPSR_IDC 0x80u
+
+/* The guest's FP environment lives partly in the host's (docs/design/04-cpu-recompiler.md,
+   "Floating point and SIMD"): the host rounding mode follows FPCR.RMode, and the exception flags
+   host arithmetic raises gather in the host's flags until they are folded into FPSR. Flags that
+   only the helpers know (input denormals, signalling NaNs they handle themselves) go straight to
+   FPSR. Flush-to-zero and default NaN are done by the helpers, so the host's FTZ and DAZ stay off. */
+
+#if defined(__x86_64__)
+#define SEM_MXCSR_FLAGS 0x3Fu
+#define SEM_MXCSR_MASKS 0x1F80u
+#define SEM_MXCSR_RC 0x6000u
+
+/* ARM RMode (nearest, +inf, -inf, zero) as MXCSR.RC (nearest, -inf, +inf, zero). */
+static inline unsigned sem_mxcsr_rounding(uint32_t fpcr) {
+    switch ((fpcr >> SEM_FPCR_RMODE_SHIFT) & 3) {
+        case 1:
+            return 0x4000u;
+        case 2:
+            return 0x2000u;
+        case 3:
+            return 0x6000u;
+        default:
+            return 0;
+    }
+}
+#endif
+
+/* The host's raised flags as FPSR bits. */
+static inline uint32_t sem_host_flags(void) {
+#if defined(__x86_64__)
+    const unsigned csr = _mm_getcsr();
+    return ((csr & 0x01u) != 0 ? SEM_FPSR_IOC : 0) | ((csr & 0x04u) != 0 ? SEM_FPSR_DZC : 0) |
+           ((csr & 0x08u) != 0 ? SEM_FPSR_OFC : 0) | ((csr & 0x10u) != 0 ? SEM_FPSR_UFC : 0) |
+           ((csr & 0x20u) != 0 ? SEM_FPSR_IXC : 0);
+#else
+    const int raised = fetestexcept(FE_ALL_EXCEPT);
+    return ((raised & FE_INVALID) != 0 ? SEM_FPSR_IOC : 0) | ((raised & FE_DIVBYZERO) != 0 ? SEM_FPSR_DZC : 0) |
+           ((raised & FE_OVERFLOW) != 0 ? SEM_FPSR_OFC : 0) | ((raised & FE_UNDERFLOW) != 0 ? SEM_FPSR_UFC : 0) |
+           ((raised & FE_INEXACT) != 0 ? SEM_FPSR_IXC : 0);
+#endif
+}
+
+static inline void sem_host_clear_flags(void) {
+#if defined(__x86_64__)
+    _mm_setcsr(_mm_getcsr() & ~SEM_MXCSR_FLAGS);
+#else
+    feclearexcept(FE_ALL_EXCEPT);
+#endif
+}
+
+static inline void sem_host_set_rounding(uint32_t fpcr) {
+#if defined(__x86_64__)
+    _mm_setcsr((_mm_getcsr() & ~SEM_MXCSR_RC) | sem_mxcsr_rounding(fpcr));
+#else
+    static const int modes[4] = {FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO};
+    fesetround(modes[(fpcr >> SEM_FPCR_RMODE_SHIFT) & 3]);
+#endif
+}
+
+/* Before guest code runs on a host thread: FPCR's rounding mode, no flags raised. */
+static inline void sem_fp_enter(const BiwaCpu* cpu) {
+#if defined(__x86_64__)
+    _mm_setcsr(SEM_MXCSR_MASKS | sem_mxcsr_rounding(cpu->fpcr));
+#else
+    feclearexcept(FE_ALL_EXCEPT);
+    sem_host_set_rounding(cpu->fpcr);
+#endif
+}
+
+/* Folds the host's raised flags into FPSR (when FPSR is read, and when guest code stops). */
+static inline void sem_fp_fold(BiwaCpu* cpu) {
+    cpu->fpsr |= sem_host_flags();
+    sem_host_clear_flags();
+}
+
+/* FP registers: the low `bytes` of Vn; writes clear the rest of the register. */
+static inline uint64_t sem_v_get(const BiwaCpu* cpu, unsigned n, unsigned bytes) {
+    uint64_t bits = 0;
+    for (unsigned i = 0; i < bytes; ++i) {
+        bits |= (uint64_t)cpu->v[n][i] << (8 * i);
+    }
+    return bits;
+}
+
+static inline void sem_v_set(BiwaCpu* cpu, unsigned d, unsigned bytes, uint64_t bits) {
+    for (unsigned i = 0; i < 16; ++i) {
+        cpu->v[d][i] = i < bytes ? (uint8_t)(bits >> (8 * i)) : 0;
+    }
+}
+
+/* Single (dbl false) and double precision as bit patterns. */
+static inline uint64_t sem_fp_sign_bit(bool dbl) { return dbl ? (uint64_t)1 << 63 : (uint64_t)1 << 31; }
+static inline uint64_t sem_fp_infinity(bool dbl) { return dbl ? 0x7FF0000000000000u : 0x7F800000u; }
+static inline uint64_t sem_fp_quiet_bit(bool dbl) { return dbl ? (uint64_t)1 << 51 : (uint64_t)1 << 22; }
+static inline uint64_t sem_fp_min_normal(bool dbl) { return dbl ? (uint64_t)1 << 52 : (uint64_t)1 << 23; }
+static inline uint64_t sem_fp_magnitude(bool dbl, uint64_t x) { return x & ~sem_fp_sign_bit(dbl); }
+static inline bool sem_fp_is_nan(bool dbl, uint64_t x) { return sem_fp_magnitude(dbl, x) > sem_fp_infinity(dbl); }
+
+static inline bool sem_fp_is_snan(bool dbl, uint64_t x) {
+    return sem_fp_is_nan(dbl, x) && (x & sem_fp_quiet_bit(dbl)) == 0;
+}
+
+static inline bool sem_fp_is_denormal(bool dbl, uint64_t x) {
+    const uint64_t magnitude = sem_fp_magnitude(dbl, x);
+    return magnitude != 0 && magnitude < sem_fp_min_normal(dbl);
+}
+
+/* An operand as the A57 reads it: with FPCR.FZ a denormal is a zero of the same sign, and FPSR.IDC
+   records that. */
+static inline uint64_t sem_fp_operand(BiwaCpu* cpu, bool dbl, uint64_t x) {
+    if ((cpu->fpcr & SEM_FPCR_FZ) != 0 && sem_fp_is_denormal(dbl, x)) {
+        cpu->fpsr |= SEM_FPSR_IDC;
+        return x & sem_fp_sign_bit(dbl);
+    }
+    return x;
+}
+
+/* A non-NaN operand as a host double (exact for single precision too). */
+static inline double sem_fp_value(bool dbl, uint64_t x) { return dbl ? sem_f64(x) : (double)sem_f32((uint32_t)x); }
+
+/* FMOV (immediate): VFPExpandImm of imm8. */
+static inline uint64_t sem_fp_expand_imm(bool dbl, uint32_t imm8) {
+    const uint64_t sign = (imm8 >> 7) & 1;
+    const uint64_t b6 = (imm8 >> 6) & 1;
+    const uint64_t b54 = (imm8 >> 4) & 3;
+    const uint64_t frac = imm8 & 15;
+    if (dbl) {
+        const uint64_t exponent = ((b6 ^ 1) << 10) | (b6 != 0 ? 0xFFu << 2 : 0) | b54;
+        return (sign << 63) | (exponent << 52) | (frac << 48);
+    }
+    const uint64_t exponent = ((b6 ^ 1) << 7) | (b6 != 0 ? 0x1Fu << 2 : 0) | b54;
+    return (sign << 31) | (exponent << 23) | (frac << 19);
+}
+
+/* FCMP, FCMPE and the compare of FCCMP / FCCMPE: NZCV for a compared with b (0110 equal, 1000 less,
+   0010 greater, 0011 unordered). A signalling NaN raises IOC; with `signal` (the E forms) any NaN
+   does. */
+static inline uint32_t sem_fcmp(BiwaCpu* cpu, bool dbl, uint64_t a, uint64_t b, bool signal) {
+    a = sem_fp_operand(cpu, dbl, a);
+    b = sem_fp_operand(cpu, dbl, b);
+    if (sem_fp_is_nan(dbl, a) || sem_fp_is_nan(dbl, b)) {
+        if (signal || sem_fp_is_snan(dbl, a) || sem_fp_is_snan(dbl, b)) {
+            cpu->fpsr |= SEM_FPSR_IOC;
+        }
+        return SEM_FLAG_C | SEM_FLAG_V;
+    }
+    const double x = sem_fp_value(dbl, a);
+    const double y = sem_fp_value(dbl, b);
+    if (x == y) {
+        return SEM_FLAG_Z | SEM_FLAG_C;
+    }
+    return x < y ? SEM_FLAG_N : SEM_FLAG_C;
 }
 
 #ifdef __cplusplus

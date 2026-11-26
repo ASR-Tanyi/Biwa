@@ -109,6 +109,15 @@ void Compare(const biwa::a64::OpInfo& info, std::uint32_t word, StepResult resul
 
 std::uint64_t Seed(Op op) { return static_cast<std::uint64_t>(op) * 7919 + 1; }
 
+// One step as guest code runs: the host FP environment set from FPCR first, its raised flags
+// folded into FPSR after.
+StepResult GuestStep(BiwaCpu& cpu, std::uint32_t word) {
+    sem_fp_enter(&cpu);
+    const StepResult result = biwa::a64::Step(cpu, word);
+    sem_fp_fold(&cpu);
+    return result;
+}
+
 class SemanticsTest : public testing::TestWithParam<Op> {};
 
 TEST_P(SemanticsTest, MatchesUnicorn) {
@@ -127,7 +136,7 @@ TEST_P(SemanticsTest, MatchesUnicorn) {
         in.pc = UnicornCpu::kCodeAddress;
         AdjustForUnicorn(op, word, in);
         BiwaCpu cpu = biwa::test::ToBiwa(in);
-        const StepResult result = biwa::a64::Step(cpu, word);
+        const StepResult result = GuestStep(cpu, word);
         Compare(info, word, result, cpu, unicorn.Run(in, std::array<std::uint32_t, 1>{word}), tally);
         if (HasFatalFailure()) {
             return;
@@ -153,7 +162,7 @@ TEST_P(ExceptionTest, BothTakeIt) {
         CpuState in = biwa::test::RandomState(rng);
         in.pc = UnicornCpu::kCodeAddress;
         BiwaCpu cpu = biwa::test::ToBiwa(in);
-        EXPECT_EQ(biwa::a64::Step(cpu, word), expected) << std::format("{:08x}", word);
+        EXPECT_EQ(GuestStep(cpu, word), expected) << std::format("{:08x}", word);
         EXPECT_EQ(cpu.pc, in.pc + (op == Op::SVC ? 4 : 0));  // SVC returns to the next instruction
         EXPECT_FALSE(unicorn.Run(in, std::array<std::uint32_t, 1>{word}).completed) << std::format("{:08x}", word);
     }
@@ -353,7 +362,7 @@ TEST_P(MemorySemanticsTest, MatchesUnicorn) {
         const std::array<std::uint32_t, 1> words{word};
         const UnicornCpu::Outcome reference = rig.Run(in, words);
         BiwaCpu cpu = biwa::test::ToBiwa(in);
-        const StepResult result = biwa::a64::Step(cpu, word);
+        const StepResult result = GuestStep(cpu, word);
         const std::string memory = rig.MemoryDiff();
         ASSERT_EQ(memory, "") << std::format("{:08x} ({})", word, info.name);
         Compare(info, word, result, cpu, reference, tally);
@@ -416,7 +425,7 @@ TEST_P(ExclusiveSequenceTest, MatchesUnicorn) {
         const UnicornCpu::Outcome reference = rig.Run(in, words);
         BiwaCpu cpu = biwa::test::ToBiwa(in);
         for (const std::uint32_t word : words) {
-            ASSERT_EQ(biwa::a64::Step(cpu, word), StepResult::kOk) << std::format("{:08x}", word);
+            ASSERT_EQ(GuestStep(cpu, word), StepResult::kOk) << std::format("{:08x}", word);
         }
         ASSERT_TRUE(reference.completed) << reference.error;
         ASSERT_EQ(rig.MemoryDiff(), "") << std::format("{:08x} {:08x}", load_word, store_word);
@@ -501,6 +510,13 @@ INSTANTIATE_TEST_SUITE_P(System, ExceptionTest,
                          testing::Values(Op::SVC, Op::BRK, Op::LDLAR, Op::STLLR, Op::DC_IVAC, Op::DC_ISW, Op::DC_CSW,
                                          Op::DC_CISW, Op::IC_IALLU, Op::IC_IALLUIS, Op::DC_CVAP, Op::CFINV, Op::RMIF,
                                          Op::XAFlag, Op::AXFlag),
+                         Name);
+
+// Floating point: moves, compares and selects.
+INSTANTIATE_TEST_SUITE_P(FloatMoves, SemanticsTest,
+                         testing::Values(Op::FMOV_float, Op::FABS_float, Op::FNEG_float, Op::FMOV_float_imm,
+                                         Op::FMOV_float_gen, Op::FCSEL_float, Op::FCMP_float, Op::FCMPE_float,
+                                         Op::FCCMP_float, Op::FCCMPE_float),
                          Name);
 
 }  // namespace

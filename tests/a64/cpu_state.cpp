@@ -4,6 +4,7 @@
 #include "a64/cpu_state.h"
 
 #include <algorithm>
+#include <bit>
 #include <format>
 #include <iterator>
 
@@ -24,6 +25,76 @@ std::uint64_t RandomValue(std::mt19937_64& rng) {
     }
 }
 
+// Floating-point values worth hitting: zeros, infinities, quiet and signalling NaNs with payloads,
+// denormals, the normal range's ends, small integers and halves; else random bits.
+std::uint64_t RandomDouble(std::mt19937_64& rng) {
+    const std::uint64_t sign = (rng() & 1) << 63;
+    const std::uint64_t frac = rng() & 0xFFFFFFFFFFFFF;
+    switch (rng() % 12) {
+        case 0:
+            return sign;  // zero
+        case 1:
+            return sign | 0x7FF0000000000000;  // infinity
+        case 2:
+            return sign | 0x7FF8000000000000 | (frac >> 1);  // quiet NaN
+        case 3:
+            return sign | 0x7FF0000000000000 | ((frac >> 1) | 1);  // signalling NaN
+        case 4:
+            return sign | (frac == 0 ? 1 : frac);  // denormal
+        case 5:
+            return sign | 0x0010000000000000 | (rng() % 4 == 0 ? 0 : frac & 0xF);  // near the smallest normal
+        case 6:
+            return sign | 0x7FEFFFFFFFFFFFFF;  // largest normal
+        case 7: {
+            static constexpr std::array<double, 6> kSmall = {1.0, 2.0, 0.5, 1.5, 3.0, 100.0};
+            return std::bit_cast<std::uint64_t>(kSmall[rng() % kSmall.size()]) | sign;
+        }
+        default:
+            return rng();
+    }
+}
+
+std::uint32_t RandomFloat(std::mt19937_64& rng) {
+    const std::uint32_t sign = static_cast<std::uint32_t>(rng() & 1) << 31;
+    const auto frac = static_cast<std::uint32_t>(rng() & 0x7FFFFF);
+    switch (rng() % 12) {
+        case 0:
+            return sign;
+        case 1:
+            return sign | 0x7F800000;
+        case 2:
+            return sign | 0x7FC00000 | (frac >> 1);
+        case 3:
+            return sign | 0x7F800000 | ((frac >> 1) | 1);
+        case 4:
+            return sign | (frac == 0 ? 1 : frac);
+        case 5:
+            return sign | 0x00800000 | (rng() % 4 == 0 ? 0 : frac & 0xF);
+        case 6:
+            return sign | 0x7F7FFFFF;
+        case 7: {
+            static constexpr std::array<float, 6> kSmall = {1.0F, 2.0F, 0.5F, 1.5F, 3.0F, 100.0F};
+            return std::bit_cast<std::uint32_t>(kSmall[rng() % kSmall.size()]) | sign;
+        }
+        default:
+            return static_cast<std::uint32_t>(rng());
+    }
+}
+
+// Eight bytes of a vector register: integer edges, a double, two singles, or random bits.
+std::uint64_t RandomVectorBits(std::mt19937_64& rng) {
+    switch (rng() % 4) {
+        case 0:
+            return RandomValue(rng);
+        case 1:
+            return RandomDouble(rng);
+        case 2:
+            return RandomFloat(rng) | (std::uint64_t{RandomFloat(rng)} << 32);
+        default:
+            return rng();
+    }
+}
+
 }  // namespace
 
 CpuState RandomState(std::mt19937_64& rng) {
@@ -34,9 +105,11 @@ CpuState RandomState(std::mt19937_64& rng) {
     state.nzcv = static_cast<std::uint32_t>(rng() & 0xF) << 28;
     // AHP (26), DN (25), FZ (24), RMode (23..22); the trap enables stay clear as on the console.
     state.fpcr = static_cast<std::uint32_t>(rng() & 0x1F) << 22;
+    // Cumulative exception flags (IOC, DZC, OFC, UFC, IXC, IDC) already raised, sometimes.
+    state.fpsr = rng() % 4 == 0 ? static_cast<std::uint32_t>(rng() & 0x9F) : 0;
     for (auto& lane : state.v) {
         for (std::size_t i = 0; i < lane.size(); i += 8) {
-            const std::uint64_t value = RandomValue(rng);
+            const std::uint64_t value = RandomVectorBits(rng);
             for (std::size_t b = 0; b < 8; ++b) {
                 lane[i + b] = static_cast<std::uint8_t>(value >> (8 * b));
             }

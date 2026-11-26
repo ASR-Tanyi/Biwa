@@ -675,6 +675,7 @@ StepResult SystemRegisterAccess(BiwaCpu& cpu, std::uint32_t word, bool read) {
                 value = cpu.fpcr;
                 break;
             case kFpsr:
+                sem_fp_fold(&cpu);
                 value = cpu.fpsr;
                 break;
             case kPmuserenrEl0:
@@ -705,9 +706,11 @@ StepResult SystemRegisterAccess(BiwaCpu& cpu, std::uint32_t word, bool read) {
             break;
         case kFpcr:
             cpu.fpcr = static_cast<std::uint32_t>(value) & SEM_FPCR_MASK;
+            sem_host_set_rounding(cpu.fpcr);
             break;
         case kFpsr:
             cpu.fpsr = static_cast<std::uint32_t>(value) & SEM_FPSR_MASK;
+            sem_host_clear_flags();
             break;
         case kTpidrEl0:
             cpu.tpidr_el0 = value;
@@ -753,6 +756,114 @@ StepResult Exclusive(BiwaCpu& cpu, Op op, std::uint32_t word) {
         default:  // STLR
             sem_stlr(&cpu, size, t, address);
             break;
+    }
+    return StepResult::kOk;
+}
+
+// ---- Floating point ----
+
+// The precision in bits 23..22: single (0) and double (1). Half precision (3) is ARMv8.2 and 2 is
+// not allocated: both undefined on the A57.
+std::optional<bool> FpDouble(std::uint32_t word) {
+    switch ((word >> 22) & 3) {
+        case 0:
+            return false;
+        case 1:
+            return true;
+        default:
+            return std::nullopt;
+    }
+}
+
+unsigned FpBytes(bool dbl) { return dbl ? 8 : 4; }
+
+// FMOV (general): between a general register and S, D or the upper half of V (type 2, rmode 1).
+StepResult FpMoveGeneral(BiwaCpu& cpu, std::uint32_t word) {
+    const bool sf = (word >> 31) != 0;
+    const std::uint32_t type = (word >> 22) & 3;
+    const std::uint32_t rmode = (word >> 19) & 3;
+    const bool to_vector = ((word >> 16) & 1) != 0;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t d = word & 31;
+    const bool single = !sf && type == 0 && rmode == 0;
+    const bool dbl = sf && type == 1 && rmode == 0;
+    const bool upper = sf && type == 2 && rmode == 1;
+    if (!single && !dbl && !upper) {
+        return StepResult::kUndefined;  // the half-precision forms are ARMv8.2
+    }
+    const unsigned bytes = single ? 4 : 8;
+    if (!upper) {
+        if (to_vector) {
+            sem_v_set(&cpu, d, bytes, sem_x(&cpu, n));
+        } else {
+            sem_set_x(&cpu, d, sem_v_get(&cpu, n, bytes));
+        }
+        return StepResult::kOk;
+    }
+    if (to_vector) {
+        const std::uint64_t value = sem_x(&cpu, n);
+        for (unsigned i = 0; i < 8; ++i) {
+            cpu.v[d][8 + i] = static_cast<std::uint8_t>(value >> (8 * i));
+        }
+    } else {
+        std::uint64_t value = 0;
+        for (unsigned i = 0; i < 8; ++i) {
+            value |= std::uint64_t{cpu.v[n][8 + i]} << (8 * i);
+        }
+        sem_set_x(&cpu, d, value);
+    }
+    return StepResult::kOk;
+}
+
+StepResult FloatingPoint(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    if (op == Op::FMOV_float_gen) {
+        return FpMoveGeneral(cpu, word);
+    }
+    const std::optional<bool> precision = FpDouble(word);
+    if (!precision) {
+        return StepResult::kUndefined;
+    }
+    const bool dbl = *precision;
+    const unsigned bytes = FpBytes(dbl);
+    const std::uint32_t d = word & 31;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t m = (word >> 16) & 31;
+    const std::uint64_t sign = sem_fp_sign_bit(dbl);
+    switch (op) {
+        case Op::FMOV_float:
+            sem_v_set(&cpu, d, bytes, sem_v_get(&cpu, n, bytes));
+            break;
+        case Op::FABS_float:
+            sem_v_set(&cpu, d, bytes, sem_v_get(&cpu, n, bytes) & ~sign);
+            break;
+        case Op::FNEG_float:
+            sem_v_set(&cpu, d, bytes, sem_v_get(&cpu, n, bytes) ^ sign);
+            break;
+        case Op::FMOV_float_imm:
+            sem_v_set(&cpu, d, bytes, sem_fp_expand_imm(dbl, (word >> 13) & 0xFF));
+            break;
+        case Op::FCSEL_float: {
+            const bool holds = sem_condition_holds(cpu.nzcv, (word >> 12) & 15);
+            sem_v_set(&cpu, d, bytes, sem_v_get(&cpu, holds ? n : m, bytes));
+            break;
+        }
+        case Op::FCMP_float:
+        case Op::FCMPE_float: {
+            const std::uint64_t b = ((word >> 3) & 1) != 0 ? 0 : sem_v_get(&cpu, m, bytes);  // #0.0 form
+            cpu.nzcv = sem_fcmp(&cpu, dbl, sem_v_get(&cpu, n, bytes), b, op == Op::FCMPE_float);
+            break;
+        }
+        case Op::FCCMP_float:
+        case Op::FCCMPE_float:
+            if (sem_condition_holds(cpu.nzcv, (word >> 12) & 15)) {
+                cpu.nzcv =
+                    sem_fcmp(&cpu, dbl, sem_v_get(&cpu, n, bytes), sem_v_get(&cpu, m, bytes), op == Op::FCCMPE_float);
+            } else {
+                cpu.nzcv = (word & 15) << 28;
+            }
+            break;
+        default:
+            return StepResult::kNotImplemented;
     }
     return StepResult::kOk;
 }
@@ -819,6 +930,17 @@ StepResult System(BiwaCpu& cpu, Op op, std::uint32_t word) {
         case Op::XAFlag:
         case Op::AXFlag:
             return StepResult::kUndefined;
+        case Op::FMOV_float:
+        case Op::FABS_float:
+        case Op::FNEG_float:
+        case Op::FMOV_float_imm:
+        case Op::FMOV_float_gen:
+        case Op::FCSEL_float:
+        case Op::FCMP_float:
+        case Op::FCMPE_float:
+        case Op::FCCMP_float:
+        case Op::FCCMPE_float:
+            return FloatingPoint(cpu, op, word);
         default:
             return LoadStore(cpu, op, word);
     }

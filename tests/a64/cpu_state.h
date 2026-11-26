@@ -29,7 +29,8 @@ struct CpuState {
 
 // Random registers, flags and FPCR settings (rounding mode, flush-to-zero, default NaN, AHP).
 // Integer registers sometimes hold small or edge values (0, -1, sign bits) so flags and carries are
-// exercised. `sp` and `pc` are left to the caller.
+// exercised; vector registers sometimes hold FP edge values (NaNs, infinities, denormals); FPSR
+// sometimes has flags raised. `sp` and `pc` are left to the caller.
 CpuState RandomState(std::mt19937_64& rng);
 
 // Between the test state and the runtime's BiwaCpu (the exclusive monitor and thread stay clear).

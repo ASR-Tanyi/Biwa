@@ -275,6 +275,42 @@ TEST(A64InterpreterTest, ExclusivesAreAtomicAcrossThreads) {
     EXPECT_EQ(counter, std::uint64_t{kThreads} * kAdds);
 }
 
+// The low eight bytes of Vn.
+std::uint64_t Low(const BiwaCpu& cpu, unsigned n) {
+    std::uint64_t value = 0;
+    std::memcpy(&value, cpu.v[n], 8);
+    return value;
+}
+
+TEST(A64InterpreterTest, RunsFloatingPointMovesAndCompares) {
+    BiwaCpu cpu = Cpu();
+    sem_fp_enter(&cpu);
+    ASSERT_EQ(Step(cpu, 0x1E2F1000), StepResult::kOk);  // fmov s0, #1.5
+    EXPECT_EQ(Low(cpu, 0), 0x3FC00000u);
+    ASSERT_EQ(Step(cpu, 0x1E701001), StepResult::kOk);  // fmov d1, #-2.0
+    EXPECT_EQ(Low(cpu, 1), 0xC000000000000000u);
+    ASSERT_EQ(Step(cpu, 0x1E202008), StepResult::kOk);  // fcmp s0, #0.0
+    EXPECT_EQ(cpu.nzcv, SEM_FLAG_C);
+    ASSERT_EQ(Step(cpu, 0x1E612020), StepResult::kOk);  // fcmp d1, d1
+    EXPECT_EQ(cpu.nzcv, SEM_FLAG_Z | SEM_FLAG_C);
+    ASSERT_EQ(Step(cpu, 0x9E660022), StepResult::kOk);  // fmov x2, d1
+    EXPECT_EQ(cpu.x[2], 0xC000000000000000u);
+    cpu.v[3][0] = 0x77;
+    ASSERT_EQ(Step(cpu, 0x9EAF0043), StepResult::kOk);  // fmov v3.d[1], x2
+    EXPECT_EQ(cpu.v[3][0], 0x77);                       // the low half stays
+    EXPECT_EQ(cpu.v[3][15], 0xC0);
+    ASSERT_EQ(Step(cpu, 0x1E60C024), StepResult::kOk);  // fabs d4, d1
+    ASSERT_EQ(Step(cpu, 0x1E64CC25), StepResult::kOk);  // fcsel d5, d1, d4, gt (gt fails)
+    EXPECT_EQ(Low(cpu, 5), 0x4000000000000000u);
+    const std::uint32_t quiet_nan = 0x7FC00000;
+    std::memcpy(cpu.v[6], &quiet_nan, 4);
+    ASSERT_EQ(Step(cpu, 0x1E2020D0), StepResult::kOk);  // fcmpe s6, s0
+    EXPECT_EQ(cpu.nzcv, SEM_FLAG_C | SEM_FLAG_V);       // unordered
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_IOC);                  // FCMPE signals on a quiet NaN
+    ASSERT_EQ(Step(cpu, 0x1E201404), StepResult::kOk);  // fccmp s0, s0, #4, ne
+    EXPECT_EQ(cpu.nzcv, SEM_FLAG_Z | SEM_FLAG_C);
+}
+
 TEST(A64InterpreterTest, RejectsWhatItCannotRun) {
     BiwaCpu cpu = Cpu();
     EXPECT_EQ(Step(cpu, 0x91800000), StepResult::kUndefined);       // add with a reserved shift
