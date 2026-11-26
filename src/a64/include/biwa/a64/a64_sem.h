@@ -2412,6 +2412,465 @@ static inline void sem_simd_shll_imm(BiwaCpu* cpu, bool u, bool q, unsigned esiz
     sem_vwrite(cpu, d, &r, true);
 }
 
+/* ---- Advanced SIMD: floating point ---- */
+
+static inline uint64_t sem_fp_constant(bool dbl, double value) {
+    return dbl ? sem_f64_bits(value) : sem_f32_bits((float)value);
+}
+
+/* FMULX: FMUL, except that infinity times zero is 2.0 (with the sign of the product). */
+static inline uint64_t sem_fp_mulx(BiwaCpu* cpu, bool dbl, uint64_t a, uint64_t b) {
+    const uint64_t fa = sem_fp_operand(cpu, dbl, a);
+    const uint64_t fb = sem_fp_operand(cpu, dbl, b);
+    if (!sem_fp_is_nan(dbl, fa) && !sem_fp_is_nan(dbl, fb) &&
+        ((sem_fp_is_infinity(dbl, fa) && sem_fp_is_zero(dbl, fb)) ||
+         (sem_fp_is_zero(dbl, fa) && sem_fp_is_infinity(dbl, fb)))) {
+        return sem_fp_constant(dbl, 2.0) | ((fa ^ fb) & sem_fp_sign_bit(dbl));
+    }
+    return sem_fp_binary(cpu, dbl, SEM_FP_MUL, a, b);
+}
+
+/* FRECPS (2 - a * b) and FRSQRTS ((3 - a * b) / 2), fused: one rounding. Infinity times zero gives
+   2.0 / 1.5. For FRSQRTS an operand that halves exactly is halved first, so 1.5 - (a / 2) * b
+   cannot overflow where the true result does not. */
+static inline uint64_t sem_fp_recip_step(BiwaCpu* cpu, bool dbl, uint64_t a, uint64_t b, bool sqrt_step) {
+    const uint64_t sign = sem_fp_sign_bit(dbl);
+    a = sem_fp_operand(cpu, dbl, a ^ sign);
+    b = sem_fp_operand(cpu, dbl, b);
+    if (sem_fp_is_nan(dbl, a) || sem_fp_is_nan(dbl, b)) {
+        return sem_fp_process_nans(cpu, dbl, a, b, 0, 2);
+    }
+    if ((sem_fp_is_infinity(dbl, a) && sem_fp_is_zero(dbl, b)) ||
+        (sem_fp_is_zero(dbl, a) && sem_fp_is_infinity(dbl, b))) {
+        return sem_fp_constant(dbl, sqrt_step ? 1.5 : 2.0);
+    }
+    if (!sqrt_step) {
+        return sem_fp_arith(cpu, dbl, SEM_FP_MULADD, a, b, sem_fp_constant(dbl, 2.0));
+    }
+    const unsigned exponent_shift = dbl ? 52 : 23;
+    const uint64_t exponent_mask = dbl ? 0x7FFu : 0xFFu;
+    const uint64_t one_exponent = (uint64_t)1 << exponent_shift;
+    const bool halve_a = ((a >> exponent_shift) & exponent_mask) >= 2 && !sem_fp_is_infinity(dbl, a);
+    const bool halve_b = !halve_a && ((b >> exponent_shift) & exponent_mask) >= 2 && !sem_fp_is_infinity(dbl, b);
+    if (halve_a || halve_b || sem_fp_is_infinity(dbl, a) || sem_fp_is_infinity(dbl, b)) {
+        if (halve_a) {
+            a -= one_exponent;
+        } else if (halve_b) {
+            b -= one_exponent;
+        }
+        return sem_fp_arith(cpu, dbl, SEM_FP_MULADD, a, b, sem_fp_constant(dbl, 1.5));
+    }
+    /* Both operands tiny: the product cannot overflow, and halving a result near 1.5 is exact. */
+    const uint64_t r = sem_fp_arith(cpu, dbl, SEM_FP_MULADD, a, b, sem_fp_constant(dbl, 3.0));
+    return r - one_exponent;
+}
+
+/* RecipEstimate and RecipSqrtEstimate: 9-bit estimates of 1 / a and 1 / sqrt(a), a in units of
+   1/512 (256..511, and 128..511 for the square root). */
+static inline unsigned sem_recip_estimate(unsigned a) {
+    a = a * 2 + 1;
+    const unsigned b = (1u << 19) / a;
+    return (b + 1) / 2;
+}
+
+static inline unsigned sem_recip_sqrt_estimate(unsigned a) {
+    if (a < 256) {
+        a = a * 2 + 1;
+    } else {
+        a = (a >> 1) << 1;
+        a = (a + 1) * 2;
+    }
+    unsigned b = 512;
+    while ((uint64_t)a * (b + 1) * (b + 1) < ((uint64_t)1 << 28)) {
+        ++b;
+    }
+    return (b + 1) / 2;
+}
+
+/* FRECPE (FPRecipEstimate). */
+static inline uint64_t sem_fp_recip_estimate(BiwaCpu* cpu, bool dbl, uint64_t x) {
+    x = sem_fp_operand(cpu, dbl, x);
+    const uint64_t sign = x & sem_fp_sign_bit(dbl);
+    if (sem_fp_is_nan(dbl, x)) {
+        return sem_fp_process_nan(cpu, dbl, x);
+    }
+    if (sem_fp_is_infinity(dbl, x)) {
+        return sign;
+    }
+    if (sem_fp_is_zero(dbl, x)) {
+        cpu->fpsr |= SEM_FPSR_DZC;
+        return sign | sem_fp_infinity(dbl);
+    }
+    const uint64_t magnitude = sem_fp_magnitude(dbl, x);
+    /* Below 2^-128 (2^-1024): the estimate overflows. */
+    if (magnitude < (dbl ? (uint64_t)1 << 50 : (uint64_t)1 << 21)) {
+        const unsigned rounding = sem_fp_rounding(cpu);
+        const bool to_infinity = rounding == SEM_ROUND_NEAREST || (rounding == SEM_ROUND_UP && sign == 0) ||
+                                 (rounding == SEM_ROUND_DOWN && sign != 0);
+        cpu->fpsr |= SEM_FPSR_OFC | SEM_FPSR_IXC;
+        return sign | (to_infinity ? sem_fp_infinity(dbl) : sem_fp_infinity(dbl) - 1);
+    }
+    /* With FZ, at or above 2^126 (2^1022): the estimate is tiny and flushes. */
+    if ((cpu->fpcr & SEM_FPCR_FZ) != 0 && magnitude >= (dbl ? (uint64_t)0x7FD << 52 : (uint64_t)0xFD << 23)) {
+        cpu->fpsr |= SEM_FPSR_UFC;
+        return sign;
+    }
+    uint64_t fraction = dbl ? x & 0xFFFFFFFFFFFFFu : (x & 0x7FFFFFu) << 29;
+    int exponent = (int)(dbl ? (x >> 52) & 0x7FF : (x >> 23) & 0xFF);
+    if (exponent == 0) {
+        if (((fraction >> 51) & 1) == 0) {
+            exponent = -1;
+            fraction = (fraction << 2) & 0xFFFFFFFFFFFFFu;
+        } else {
+            fraction = (fraction << 1) & 0xFFFFFFFFFFFFFu;
+        }
+    }
+    const unsigned scaled = 256 + (unsigned)(fraction >> 44);
+    int result_exponent = (dbl ? 2045 : 253) - exponent;
+    const uint64_t estimate = sem_recip_estimate(scaled);
+    uint64_t result_fraction = (estimate & 0xFF) << 44;
+    if (result_exponent == 0) {
+        result_fraction = ((uint64_t)1 << 51) | (result_fraction >> 1);
+    } else if (result_exponent == -1) {
+        result_fraction = ((uint64_t)1 << 50) | (result_fraction >> 2);
+        result_exponent = 0;
+    }
+    if (dbl) {
+        return sign | ((uint64_t)result_exponent << 52) | result_fraction;
+    }
+    return sign | ((uint64_t)result_exponent << 23) | (result_fraction >> 29);
+}
+
+/* FRSQRTE (FPRSqrtEstimate). */
+static inline uint64_t sem_fp_rsqrt_estimate(BiwaCpu* cpu, bool dbl, uint64_t x) {
+    x = sem_fp_operand(cpu, dbl, x);
+    const uint64_t sign = x & sem_fp_sign_bit(dbl);
+    if (sem_fp_is_nan(dbl, x)) {
+        return sem_fp_process_nan(cpu, dbl, x);
+    }
+    if (sem_fp_is_zero(dbl, x)) {
+        cpu->fpsr |= SEM_FPSR_DZC;
+        return sign | sem_fp_infinity(dbl);
+    }
+    if (sign != 0) {
+        cpu->fpsr |= SEM_FPSR_IOC;
+        return sem_fp_default_nan(dbl);
+    }
+    if (sem_fp_is_infinity(dbl, x)) {
+        return 0;
+    }
+    uint64_t fraction = dbl ? x & 0xFFFFFFFFFFFFFu : (x & 0x7FFFFFu) << 29;
+    int exponent = (int)(dbl ? (x >> 52) & 0x7FF : (x >> 23) & 0xFF);
+    if (exponent == 0) {
+        while (((fraction >> 51) & 1) == 0) {
+            fraction <<= 1;
+            --exponent;
+        }
+        fraction = (fraction << 1) & 0xFFFFFFFFFFFFFu;
+    }
+    const unsigned scaled = (exponent & 1) == 0 ? 256 + (unsigned)(fraction >> 44) : 128 + (unsigned)(fraction >> 45);
+    const int result_exponent = ((dbl ? 3068 : 380) - exponent) / 2;
+    const uint64_t estimate = sem_recip_sqrt_estimate(scaled) & 0xFF;
+    if (dbl) {
+        return ((uint64_t)result_exponent << 52) | (estimate << 44);
+    }
+    return ((uint64_t)result_exponent << 23) | (estimate << 15);
+}
+
+/* FRECPX: the exponent inverted, the fraction cleared (zeros and denormals give the largest
+   exponent but one). */
+static inline uint64_t sem_fp_recpx(BiwaCpu* cpu, bool dbl, uint64_t x) {
+    x = sem_fp_operand(cpu, dbl, x);
+    if (sem_fp_is_nan(dbl, x)) {
+        return sem_fp_process_nan(cpu, dbl, x);
+    }
+    const unsigned shift = dbl ? 52 : 23;
+    const uint64_t mask = dbl ? 0x7FFu : 0xFFu;
+    const uint64_t exponent = (x >> shift) & mask;
+    const uint64_t result = exponent == 0 ? mask - 1 : ~exponent & mask;
+    return (x & sem_fp_sign_bit(dbl)) | (result << shift);
+}
+
+/* URECPE and URSQRTE on 32-bit lanes. */
+static inline uint64_t sem_urecpe(uint64_t x) {
+    if (((x >> 31) & 1) == 0) {
+        return 0xFFFFFFFFu;
+    }
+    return ((uint64_t)sem_recip_estimate((unsigned)(x >> 23) & 0x1FF) & 0x1FF) << 23;
+}
+
+static inline uint64_t sem_ursqrte(uint64_t x) {
+    if (((x >> 30) & 3) == 0) {
+        return 0xFFFFFFFFu;
+    }
+    return ((uint64_t)sem_recip_sqrt_estimate((unsigned)(x >> 23) & 0x1FF) & 0x1FF) << 23;
+}
+
+enum { SEM_FCM_EQ, SEM_FCM_GE, SEM_FCM_GT, SEM_FAC_GE, SEM_FAC_GT };
+
+/* FCMEQ, FCMGE, FCMGT, FACGE, FACGT (register or zero): all ones when the comparison holds. FCMEQ
+   is quiet (IOC for signalling NaNs only); the others signal on any NaN. */
+static inline uint64_t sem_fp_compare_mask(BiwaCpu* cpu, bool dbl, unsigned cmp, uint64_t a, uint64_t b) {
+    a = sem_fp_operand(cpu, dbl, a);
+    b = sem_fp_operand(cpu, dbl, b);
+    const uint64_t ones = dbl ? ~(uint64_t)0 : 0xFFFFFFFFu;
+    if (sem_fp_is_nan(dbl, a) || sem_fp_is_nan(dbl, b)) {
+        if (cmp != SEM_FCM_EQ || sem_fp_is_snan(dbl, a) || sem_fp_is_snan(dbl, b)) {
+            cpu->fpsr |= SEM_FPSR_IOC;
+        }
+        return 0;
+    }
+    double x = sem_fp_value(dbl, a);
+    double y = sem_fp_value(dbl, b);
+    if (cmp == SEM_FAC_GE || cmp == SEM_FAC_GT) {
+        x = __builtin_fabs(x);
+        y = __builtin_fabs(y);
+    }
+    bool holds = false;
+    switch (cmp) {
+        case SEM_FCM_EQ:
+            holds = x == y;
+            break;
+        case SEM_FCM_GE:
+        case SEM_FAC_GE:
+            holds = x >= y;
+            break;
+        default:
+            holds = x > y;
+            break;
+    }
+    return holds ? ones : 0;
+}
+
+/* FCVTXN: double to single rounding to odd (the low bit set when inexact). */
+static inline uint64_t sem_fp_convert_odd(BiwaCpu* cpu, uint64_t x) {
+    const uint64_t flushed = sem_fp_operand(cpu, true, x);
+    if (sem_fp_is_nan(true, flushed) || sem_fp_is_infinity(true, flushed) || sem_fp_is_zero(true, flushed)) {
+        return sem_fp_convert(cpu, true, x);
+    }
+    const uint32_t fpcr = cpu->fpcr;
+    cpu->fpcr = (fpcr & ~(3u << SEM_FPCR_RMODE_SHIFT)) | (3u << SEM_FPCR_RMODE_SHIFT);
+    sem_host_set_rounding(cpu->fpcr);
+    uint64_t r = sem_fp_arith(cpu, false, SEM_FP_NARROW, flushed, 0, 0);
+    cpu->fpcr = fpcr;
+    sem_host_set_rounding(fpcr);
+    /* Inexact: the low bit set, also on a result truncated to zero (but not on one flushed by FZ). */
+    const bool flushed_to_zero = (fpcr & SEM_FPCR_FZ) != 0 && sem_fp_is_zero(false, r);
+    if (!flushed_to_zero && sem_f64_bits((double)sem_f32((uint32_t)r)) != flushed) {
+        r |= 1;
+    }
+    return r;
+}
+
+enum {
+    SEM_VF_ADD,
+    SEM_VF_SUB,
+    SEM_VF_MUL,
+    SEM_VF_DIV,
+    SEM_VF_MAX,
+    SEM_VF_MIN,
+    SEM_VF_MAXNM,
+    SEM_VF_MINNM,
+    SEM_VF_MULX,
+    SEM_VF_ABD,
+    SEM_VF_RECPS,
+    SEM_VF_RSQRTS,
+    SEM_VF_CMEQ,
+    SEM_VF_CMGE,
+    SEM_VF_CMGT,
+    SEM_VF_ACGE,
+    SEM_VF_ACGT,
+    SEM_VF_MLA,
+    SEM_VF_MLS
+};
+
+/* One lane of the FP three-same forms (`acc`: Vd's lane for FMLA / FMLS). */
+static inline uint64_t sem_fp3_lane(BiwaCpu* cpu, unsigned op, bool dbl, uint64_t a, uint64_t b, uint64_t acc) {
+    switch (op) {
+        case SEM_VF_ADD:
+            return sem_fp_binary(cpu, dbl, SEM_FP_ADD, a, b);
+        case SEM_VF_SUB:
+            return sem_fp_binary(cpu, dbl, SEM_FP_SUB, a, b);
+        case SEM_VF_MUL:
+            return sem_fp_binary(cpu, dbl, SEM_FP_MUL, a, b);
+        case SEM_VF_DIV:
+            return sem_fp_binary(cpu, dbl, SEM_FP_DIV, a, b);
+        case SEM_VF_MAX:
+        case SEM_VF_MIN:
+        case SEM_VF_MAXNM:
+        case SEM_VF_MINNM:
+            return sem_fp_max(cpu, dbl, a, b, op == SEM_VF_MAX || op == SEM_VF_MAXNM,
+                              op == SEM_VF_MAXNM || op == SEM_VF_MINNM);
+        case SEM_VF_MULX:
+            return sem_fp_mulx(cpu, dbl, a, b);
+        case SEM_VF_ABD:
+            return sem_fp_binary(cpu, dbl, SEM_FP_SUB, a, b) & ~sem_fp_sign_bit(dbl);
+        case SEM_VF_RECPS:
+        case SEM_VF_RSQRTS:
+            return sem_fp_recip_step(cpu, dbl, a, b, op == SEM_VF_RSQRTS);
+        case SEM_VF_CMEQ:
+            return sem_fp_compare_mask(cpu, dbl, SEM_FCM_EQ, a, b);
+        case SEM_VF_CMGE:
+            return sem_fp_compare_mask(cpu, dbl, SEM_FCM_GE, a, b);
+        case SEM_VF_CMGT:
+            return sem_fp_compare_mask(cpu, dbl, SEM_FCM_GT, a, b);
+        case SEM_VF_ACGE:
+            return sem_fp_compare_mask(cpu, dbl, SEM_FAC_GE, a, b);
+        case SEM_VF_ACGT:
+            return sem_fp_compare_mask(cpu, dbl, SEM_FAC_GT, a, b);
+        case SEM_VF_MLA:
+            return sem_fp_muladd(cpu, dbl, acc, a, b);
+        default:
+            return sem_fp_muladd(cpu, dbl, acc, a ^ sem_fp_sign_bit(dbl), b);
+    }
+}
+
+/* The FP three-same forms, vector or scalar; `pairwise` (FADDP, FMAXP, ...) takes adjacent lanes
+   of Vm:Vn. */
+static inline void sem_simd_fp3_v(BiwaCpu* cpu, unsigned op, bool q, bool scalar, bool pairwise, bool dbl, unsigned d,
+                                  SemVec a, SemVec b) {
+    const SemVec acc = sem_vread(cpu, d);
+    const unsigned esize = dbl ? 8 : 4;
+    const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / esize;
+    SemVec r = {{0}};
+    for (unsigned i = 0; i < lanes; ++i) {
+        uint64_t out = 0;
+        if (pairwise) {
+            const SemVec* src = 2 * i < lanes ? &a : &b;
+            const unsigned k = (2 * i) % lanes;
+            out = sem_fp3_lane(cpu, op, dbl, sem_lane(src, k, esize), sem_lane(src, k + 1, esize), 0);
+        } else {
+            out = sem_fp3_lane(cpu, op, dbl, sem_lane(&a, i, esize), sem_lane(&b, i, esize), sem_lane(&acc, i, esize));
+        }
+        sem_set_lane(&r, i, esize, out);
+    }
+    sem_vwrite(cpu, d, &r, q && !scalar);
+}
+
+/* FADDP, FMAXP, FMINP, FMAXNMP, FMINNMP (scalar): the two lanes of Vn. FMAXV, FMINV, FMAXNMV,
+   FMINNMV: the four single lanes of Vn, reduced as a tree ((0, 1), (2, 3)). */
+static inline void sem_simd_fp_reduce(BiwaCpu* cpu, unsigned op, bool dbl, unsigned lanes, unsigned d, unsigned n) {
+    const SemVec a = sem_vread(cpu, n);
+    const unsigned esize = dbl ? 8 : 4;
+    uint64_t out = sem_fp3_lane(cpu, op, dbl, sem_lane(&a, 0, esize), sem_lane(&a, 1, esize), 0);
+    if (lanes == 4) {
+        const uint64_t upper = sem_fp3_lane(cpu, op, dbl, sem_lane(&a, 2, esize), sem_lane(&a, 3, esize), 0);
+        out = sem_fp3_lane(cpu, op, dbl, out, upper, 0);
+    }
+    SemVec r = {{0}};
+    sem_set_lane(&r, 0, esize, out);
+    sem_vwrite(cpu, d, &r, false);
+}
+
+enum {
+    SEM_VF1_ABS,
+    SEM_VF1_NEG,
+    SEM_VF1_SQRT,
+    SEM_VF1_RECPE,
+    SEM_VF1_RSQRTE,
+    SEM_VF1_RECPX,
+    SEM_VF1_ROUND,
+    SEM_VF1_TO_INT,
+    SEM_VF1_FROM_INT,
+    SEM_VF1_CMGT0,
+    SEM_VF1_CMGE0,
+    SEM_VF1_CMEQ0,
+    SEM_VF1_CMLE0,
+    SEM_VF1_CMLT0,
+    SEM_VF1_URECPE,
+    SEM_VF1_URSQRTE
+};
+
+/* One lane of the FP two-register forms. ROUND: `rounding` (exact: FRINTX); TO_INT: `rounding`,
+   `is_unsigned`, `fbits`; FROM_INT: `is_unsigned`, `fbits`. */
+static inline uint64_t sem_fp1_lane(BiwaCpu* cpu, unsigned op, bool dbl, uint64_t x, unsigned rounding,
+                                    bool is_unsigned, unsigned fbits, bool exact) {
+    const uint64_t sign = sem_fp_sign_bit(dbl);
+    switch (op) {
+        case SEM_VF1_ABS:
+            return x & ~sign;
+        case SEM_VF1_NEG:
+            return x ^ sign;
+        case SEM_VF1_SQRT:
+            return sem_fp_sqrt(cpu, dbl, x);
+        case SEM_VF1_RECPE:
+            return sem_fp_recip_estimate(cpu, dbl, x);
+        case SEM_VF1_RSQRTE:
+            return sem_fp_rsqrt_estimate(cpu, dbl, x);
+        case SEM_VF1_RECPX:
+            return sem_fp_recpx(cpu, dbl, x);
+        case SEM_VF1_ROUND:
+            return sem_fp_round_int(cpu, dbl, x, rounding, exact);
+        case SEM_VF1_TO_INT:
+            return sem_fp_to_int(cpu, dbl, x, fbits, rounding, dbl ? 64 : 32, is_unsigned);
+        case SEM_VF1_FROM_INT:
+            return sem_int_to_fp(dbl, x, dbl ? 64 : 32, is_unsigned, fbits);
+        case SEM_VF1_CMGT0:
+            return sem_fp_compare_mask(cpu, dbl, SEM_FCM_GT, x, 0);
+        case SEM_VF1_CMGE0:
+            return sem_fp_compare_mask(cpu, dbl, SEM_FCM_GE, x, 0);
+        case SEM_VF1_CMEQ0:
+            return sem_fp_compare_mask(cpu, dbl, SEM_FCM_EQ, x, 0);
+        case SEM_VF1_CMLE0:
+            return sem_fp_compare_mask(cpu, dbl, SEM_FCM_GE, 0, x);
+        case SEM_VF1_CMLT0:
+            return sem_fp_compare_mask(cpu, dbl, SEM_FCM_GT, 0, x);
+        case SEM_VF1_URECPE:
+            return sem_urecpe(x);
+        default:
+            return sem_ursqrte(x);
+    }
+}
+
+static inline void sem_simd_fp1(BiwaCpu* cpu, unsigned op, bool q, bool scalar, bool dbl, unsigned d, unsigned n,
+                                unsigned rounding, bool is_unsigned, unsigned fbits, bool exact) {
+    const SemVec a = sem_vread(cpu, n);
+    const unsigned esize = dbl ? 8 : 4;
+    const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / esize;
+    SemVec r = {{0}};
+    for (unsigned i = 0; i < lanes; ++i) {
+        sem_set_lane(&r, i, esize,
+                     sem_fp1_lane(cpu, op, dbl, sem_lane(&a, i, esize), rounding, is_unsigned, fbits, exact));
+    }
+    sem_vwrite(cpu, d, &r, q && !scalar);
+}
+
+/* FCVTL / FCVTL2: half to single (dbl false) or single to double, from the low or (q) upper half. */
+static inline void sem_simd_fcvtl(BiwaCpu* cpu, bool q, bool dbl, unsigned d, unsigned n) {
+    const SemVec a = sem_vread(cpu, n);
+    const unsigned from = dbl ? 4 : 2;
+    const unsigned lanes = 8 / from;
+    SemVec r = {{0}};
+    for (unsigned i = 0; i < lanes; ++i) {
+        const uint64_t x = sem_lane(&a, (q ? lanes : 0) + i, from);
+        sem_set_lane(&r, i, 2 * from, dbl ? sem_fp_convert(cpu, false, x) : sem_fp_from_half(cpu, false, x));
+    }
+    sem_vwrite(cpu, d, &r, true);
+}
+
+/* FCVTN / FCVTN2 (single to half, double to single) and FCVTXN / FCVTXN2 (`odd`: double to single
+   rounding to odd), into the low half of Vd or (q) its upper half; scalar FCVTXN: one lane. */
+static inline void sem_simd_fcvtn(BiwaCpu* cpu, bool q, bool scalar, bool dbl, bool odd, unsigned d, unsigned n) {
+    const SemVec a = sem_vread(cpu, n);
+    const unsigned to = dbl ? 4 : 2;
+    const unsigned lanes = scalar ? 1 : 8 / to;
+    SemVec r = {{0}};
+    if (q && !scalar) {
+        r = sem_vread(cpu, d);
+    }
+    for (unsigned i = 0; i < lanes; ++i) {
+        const uint64_t x = sem_lane(&a, i, 2 * to);
+        uint64_t out = 0;
+        if (odd) {
+            out = sem_fp_convert_odd(cpu, x);
+        } else {
+            out = dbl ? sem_fp_convert(cpu, true, x) : sem_fp_to_half(cpu, false, x);
+        }
+        sem_set_lane(&r, (q && !scalar ? lanes : 0) + i, to, out);
+    }
+    sem_vwrite(cpu, d, &r, true);
+}
+
 #ifdef __cplusplus
 }
 #pragma clang diagnostic pop

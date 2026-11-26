@@ -459,13 +459,46 @@ TEST(A64InterpreterTest, RunsSimdIntegerArithmetic) {
     EXPECT_EQ(lane(9, 2), 0x00010001u);
 }
 
+TEST(A64InterpreterTest, RunsSimdFloatingPoint) {
+    BiwaCpu cpu = Cpu();
+    const auto set = [&](unsigned v, std::array<std::uint32_t, 4> lanes) { std::memcpy(cpu.v[v], lanes.data(), 16); };
+    const auto lane = [&](unsigned v, unsigned i) {
+        std::uint32_t value = 0;
+        std::memcpy(&value, &cpu.v[v][std::size_t{4} * i], 4);
+        return value;
+    };
+    set(1, {0x3F800000, 0x40000000, 0x40400000, 0x40800000});  // 1, 2, 3, 4
+    set(2, {0x3F000000, 0xBF800000, 0x41000000, 0x7FC00000});  // 0.5, -1, 8, NaN
+    set(3, {0x3F800000, 0x3F800000, 0x3F800000, 0x3F800000});
+    sem_fp_enter(&cpu);
+    ASSERT_EQ(Step(cpu, 0x4E22D420), StepResult::kOk);  // fadd v0.4s, v1.4s, v2.4s
+    EXPECT_EQ(lane(0, 0), 0x3FC00000u);
+    EXPECT_EQ(lane(0, 3), 0x7FC00000u);
+    ASSERT_EQ(Step(cpu, 0x4FA21023), StepResult::kOk);  // fmla v3.4s, v1.4s, v2.s[1]
+    EXPECT_EQ(lane(3, 0), 0u);
+    EXPECT_EQ(lane(3, 1), 0xBF800000u);
+    ASSERT_EQ(Step(cpu, 0x6E22D424), StepResult::kOk);  // faddp v4.4s, v1.4s, v2.4s
+    EXPECT_EQ(lane(4, 0), 0x40400000u);
+    EXPECT_EQ(lane(4, 2), 0xBF000000u);
+    ASSERT_EQ(Step(cpu, 0x0E216825), StepResult::kOk);  // fcvtn v5.4h, v1.4s
+    EXPECT_EQ(Low(cpu, 5), 0x4400420040003C00u);
+    EXPECT_EQ(lane(5, 2), 0u);
+    ASSERT_EQ(Step(cpu, 0x6E22E426), StepResult::kOk);  // fcmge v6.4s, v1.4s, v2.4s
+    EXPECT_EQ(lane(6, 1), 0xFFFFFFFFu);
+    EXPECT_EQ(lane(6, 3), 0u);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_IOC);                  // FCMGE signals on the quiet NaN
+    ASSERT_EQ(Step(cpu, 0x6E30F827), StepResult::kOk);  // fmaxv s7, v1.4s
+    EXPECT_EQ(Low(cpu, 7), 0x40800000u);
+    sem_fp_fold(&cpu);
+}
+
 TEST(A64InterpreterTest, RejectsWhatItCannotRun) {
     BiwaCpu cpu = Cpu();
     EXPECT_EQ(Step(cpu, 0x91800000), StepResult::kUndefined);       // add with a reserved shift
     EXPECT_EQ(Step(cpu, 0x8BC20020), StepResult::kUndefined);       // add (shifted) with ror
     EXPECT_EQ(Step(cpu, 0x5AC00C20), StepResult::kUndefined);       // rev with the 64-bit opc on w
     EXPECT_EQ(Step(cpu, 0x00000000), StepResult::kUndefined);       // udf
-    EXPECT_EQ(Step(cpu, 0x4E21D400), StepResult::kNotImplemented);  // fadd v0.4s, v0.4s, v1.4s, not yet
+    EXPECT_EQ(Step(cpu, 0x4E284820), StepResult::kNotImplemented);  // aese v0.16b, v1.16b, not yet
     EXPECT_EQ(cpu.pc, 0x1000u);
 }
 

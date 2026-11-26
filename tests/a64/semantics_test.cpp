@@ -199,6 +199,15 @@ constexpr std::uint32_t kFcvtSH = 0x1EE24020;
 constexpr std::uint32_t kFcvtSD = 0x1E624020;
 constexpr std::uint32_t kFcvtHD = 0x1E63C020;
 constexpr std::uint32_t kFcvtDH = 0x1EE2C020;
+constexpr std::uint32_t kFrecpsD = 0x5E62FC20;
+constexpr std::uint32_t kFrsqrtsD = 0x5EE2FC20;
+constexpr std::uint32_t kFrecpeD = 0x5EE1D820;
+constexpr std::uint32_t kFrsqrteD = 0x7EE1D820;
+constexpr std::uint32_t kFmulxD = 0x5E62DC20;
+constexpr std::uint32_t kFrecpxD = 0x5EE1F820;
+constexpr std::uint32_t kFrecpeS = 0x5EA1D820;
+constexpr std::uint32_t kFrsqrteS = 0x7EA1D820;
+constexpr std::uint32_t kFcvtxnSD = 0x7E616820;
 
 constexpr std::array kFpCases = {
     // Just below the smallest normal before rounding, rounded up to it: tiny on ARM, not on x86.
@@ -283,6 +292,38 @@ constexpr std::array kFpCases = {
     FpCase{kFcvtSD, 0x380FFFFFFF000000, 0, 0},
     FpCase{kFcvtSD, 0x7FF0000000000123, 0, 0},
     FpCase{kFcvtSD, 0x47F0000000000000, 0, 0},
+    // Reciprocal steps: infinity times zero, a product past the largest value, a denormal operand.
+    FpCase{kFrecpsD, 0x7FF0000000000000, 0x8000000000000000, 0},
+    FpCase{kFrsqrtsD, 0x7FF0000000000000, 0, 0},
+    FpCase{kFrsqrtsD, 0x7FEFFFFFFFFFFFFF, 0x4000000000000000, 0},
+    FpCase{kFrsqrtsD, 0x0000000000000001, 0x7FE0000000000000, 0},
+    FpCase{kFrecpsD, 0x7FEFFFFFFFFFFFFF, 0xC000000000000000, 0},
+    // Estimates: ordinary values, denormals, overflowing and (with FZ) flushing results, specials.
+    FpCase{kFrecpeD, 0x3FF0000000000000, 0, 0},
+    FpCase{kFrecpeD, 0x4008000000000000, 0, 0},
+    FpCase{kFrecpeD, 0x0000000000000001, 0, 0},
+    FpCase{kFrecpeD, 0x0004000000000000, 0, 0},
+    FpCase{kFrecpeD, 0x000C000000000000, 0, 0},
+    FpCase{kFrecpeD, 0x7FD0000000000000, 0, 0},
+    FpCase{kFrecpeD, 0x7FE8000000000000, 0, 0},
+    FpCase{kFrecpeS, 0x00200000, 0, 0},
+    FpCase{kFrecpeS, 0x001FFFFF, 0, 0},
+    FpCase{kFrecpeS, 0x7E800000, 0, 0},
+    FpCase{kFrsqrteD, 0x4010000000000000, 0, 0},
+    FpCase{kFrsqrteD, 0x4000000000000000, 0, 0},
+    FpCase{kFrsqrteD, 0x0000000000000003, 0, 0},
+    FpCase{kFrsqrteD, 0xBFF0000000000000, 0, 0},
+    FpCase{kFrsqrteD, 0, 0, 0},
+    FpCase{kFrsqrteD, 0x7FF0000000000000, 0, 0},
+    FpCase{kFrsqrteS, 0x00000001, 0, 0},
+    FpCase{kFrsqrteS, 0x7F7FFFFF, 0, 0},
+    FpCase{kFmulxD, 0x7FF0000000000000, 0x8000000000000000, 0},
+    FpCase{kFrecpxD, 0x0000000000000005, 0, 0},
+    FpCase{kFrecpxD, 0xFFF0000000000000, 0, 0},
+    // Round to odd.
+    FpCase{kFcvtxnSD, 0x3FF0000000000001, 0, 0},
+    FpCase{kFcvtxnSD, 0x0000000000000001, 0, 0},
+    FpCase{kFcvtxnSD, 0x47F0000000000000, 0, 0},
 };
 
 // FPCR: nearest, +inf, -inf, zero; with FZ; with DN; AHP, DN and FZ rounding down.
@@ -761,5 +802,39 @@ INSTANTIATE_TEST_SUITE_P(
                     Op::UMLSL_elt, Op::UMULL_elt, Op::SQDMLAL_elt_2, Op::SQDMLSL_elt_2, Op::SQDMLAL_elt_1,
                     Op::SQDMLSL_elt_1, Op::SQDMULL_elt_1, Op::SQDMULH_elt_1, Op::SQRDMULH_elt_1),
     Name);
+
+// Advanced SIMD: floating point, vector and scalar.
+INSTANTIATE_TEST_SUITE_P(
+    SimdFloat, SemanticsTest,
+    testing::Values(Op::FADD_2, Op::FSUB_2, Op::FMUL_vec_2, Op::FDIV_2, Op::FMAX_2, Op::FMIN_2, Op::FMAXNM_2,
+                    Op::FMINNM_2, Op::FMULX_vec_2, Op::FMULX_vec_4, Op::FABD_2, Op::FABD_4, Op::FRECPS_2, Op::FRECPS_4,
+                    Op::FRSQRTS_2, Op::FRSQRTS_4, Op::FCMEQ_reg_2, Op::FCMEQ_reg_4, Op::FCMGE_reg_2, Op::FCMGE_reg_4,
+                    Op::FCMGT_reg_2, Op::FCMGT_reg_4, Op::FACGE_2, Op::FACGE_4, Op::FACGT_2, Op::FACGT_4,
+                    Op::FMLA_vec_2, Op::FMLS_vec_2, Op::FADDP_vec_2, Op::FADDP_pair_2, Op::FMAXP_vec_2,
+                    Op::FMAXP_pair_2, Op::FMAXV_2, Op::FMINP_vec_2, Op::FMINP_pair_2, Op::FMINV_2, Op::FMAXNMP_vec_2,
+                    Op::FMAXNMP_pair_2, Op::FMAXNMV_2, Op::FMINNMP_vec_2, Op::FMINNMP_pair_2, Op::FMINNMV_2, Op::FABS_2,
+                    Op::FNEG_2, Op::FSQRT_2, Op::FRECPE_2, Op::FRECPE_4, Op::FRSQRTE_2, Op::FRSQRTE_4, Op::FRECPX_2,
+                    Op::FRINTN_2, Op::FRINTM_2, Op::FRINTP_2, Op::FRINTZ_2, Op::FRINTA_2, Op::FRINTX_2, Op::FRINTI_2,
+                    Op::FCVTNS_2, Op::FCVTNS_4, Op::FCVTNU_2, Op::FCVTNU_4, Op::FCVTMS_2, Op::FCVTMS_4, Op::FCVTMU_2,
+                    Op::FCVTMU_4, Op::FCVTAS_2, Op::FCVTAS_4, Op::FCVTAU_2, Op::FCVTAU_4, Op::FCVTPS_2, Op::FCVTPS_4,
+                    Op::FCVTPU_2, Op::FCVTPU_4, Op::FCVTZS_int_2, Op::FCVTZS_int_4, Op::FCVTZU_int_2, Op::FCVTZU_int_4,
+                    Op::SCVTF_int_2, Op::SCVTF_int_4, Op::UCVTF_int_2, Op::UCVTF_int_4, Op::FCMGT_zero_2,
+                    Op::FCMGT_zero_4, Op::FCMGE_zero_2, Op::FCMGE_zero_4, Op::FCMEQ_zero_2, Op::FCMEQ_zero_4,
+                    Op::FCMLE_2, Op::FCMLE_4, Op::FCMLT_2, Op::FCMLT_4, Op::URECPE, Op::URSQRTE, Op::FCVTL, Op::FCVTN,
+                    Op::FCVTXN_1, Op::FCVTXN_2, Op::FMLA_elt_2, Op::FMLA_elt_4, Op::FMLS_elt_2, Op::FMLS_elt_4,
+                    Op::FMUL_elt_2, Op::FMUL_elt_4, Op::FMULX_elt_2, Op::FMULX_elt_4, Op::SCVTF_fix_2, Op::UCVTF_fix_2,
+                    Op::FCVTZS_fix_2, Op::FCVTZU_fix_2, Op::SCVTF_fix_1, Op::UCVTF_fix_1, Op::FCVTZS_fix_1,
+                    Op::FCVTZU_fix_1),
+    Name);
+
+// Half-precision arithmetic (ARMv8.2).
+INSTANTIATE_TEST_SUITE_P(SimdHalf, ExceptionTest,
+                         testing::Values(Op::FCMEQ_reg_1, Op::FRECPS_1, Op::FRSQRTS_1, Op::FCMEQ_zero_1, Op::FRECPE_1,
+                                         Op::FRECPX_1, Op::FRSQRTE_1, Op::FMLA_elt_1, Op::FMLS_elt_1, Op::FCMEQ_reg_3,
+                                         Op::FRECPS_3, Op::FRSQRTS_3, Op::FMLA_vec_1, Op::FMLS_vec_1, Op::FRINTN_1,
+                                         Op::FRINTM_1, Op::FCMEQ_zero_3, Op::FABS_1, Op::FRINTP_1, Op::FRINTZ_1,
+                                         Op::FRECPE_3, Op::FRINTA_1, Op::FRINTX_1, Op::FNEG_1, Op::FRINTI_1,
+                                         Op::FRSQRTE_3, Op::FMLA_elt_3, Op::FMLS_elt_3),
+                         Name);
 
 }  // namespace

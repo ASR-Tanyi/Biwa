@@ -1329,6 +1329,8 @@ StepResult SimdAcross(BiwaCpu& cpu, Op op, std::uint32_t word) {
     return StepResult::kOk;
 }
 
+StepResult SimdFloatFixed(BiwaCpu& cpu, std::uint32_t word, bool scalar);
+
 // Shifts by immediate, vector and scalar: the lane size from the highest set bit of immh
 // (bits 22..19; none is reserved), the shift from immh:immb (bits 22..16), the opcode bits 15..11.
 StepResult SimdShiftImmediate(BiwaCpu& cpu, std::uint32_t word, bool scalar) {
@@ -1365,7 +1367,7 @@ StepResult SimdShiftImmediate(BiwaCpu& cpu, std::uint32_t word, bool scalar) {
             return StepResult::kOk;
         case 0x1C:  // SCVTF, UCVTF (fixed-point)
         case 0x1F:  // FCVTZS, FCVTZU (fixed-point)
-            return StepResult::kNotImplemented;
+            return SimdFloatFixed(cpu, word, scalar);
         default:
             break;
     }
@@ -1464,6 +1466,291 @@ StepResult SimdLong(BiwaCpu& cpu, Op op, std::uint32_t word) {
         return StepResult::kUndefined;
     }
     sem_simd_long(&cpu, u, opcode, q, scalar, esize, d, a, b);
+    return StepResult::kOk;
+}
+
+// ---- Advanced SIMD: floating point ----
+
+// The three-same and pairwise FP forms: which operation, and whether it is pairwise.
+struct FpThree {
+    unsigned op;
+    bool pairwise;
+};
+
+std::optional<FpThree> FpThreeOf(Op op) {
+    switch (op) {
+        case Op::FADD_2:
+            return FpThree{SEM_VF_ADD, false};
+        case Op::FSUB_2:
+            return FpThree{SEM_VF_SUB, false};
+        case Op::FMUL_vec_2:
+            return FpThree{SEM_VF_MUL, false};
+        case Op::FDIV_2:
+            return FpThree{SEM_VF_DIV, false};
+        case Op::FMAX_2:
+            return FpThree{SEM_VF_MAX, false};
+        case Op::FMIN_2:
+            return FpThree{SEM_VF_MIN, false};
+        case Op::FMAXNM_2:
+            return FpThree{SEM_VF_MAXNM, false};
+        case Op::FMINNM_2:
+            return FpThree{SEM_VF_MINNM, false};
+        case Op::FMULX_vec_2:
+        case Op::FMULX_vec_4:
+            return FpThree{SEM_VF_MULX, false};
+        case Op::FABD_2:
+        case Op::FABD_4:
+            return FpThree{SEM_VF_ABD, false};
+        case Op::FRECPS_2:
+        case Op::FRECPS_4:
+            return FpThree{SEM_VF_RECPS, false};
+        case Op::FRSQRTS_2:
+        case Op::FRSQRTS_4:
+            return FpThree{SEM_VF_RSQRTS, false};
+        case Op::FCMEQ_reg_2:
+        case Op::FCMEQ_reg_4:
+            return FpThree{SEM_VF_CMEQ, false};
+        case Op::FCMGE_reg_2:
+        case Op::FCMGE_reg_4:
+            return FpThree{SEM_VF_CMGE, false};
+        case Op::FCMGT_reg_2:
+        case Op::FCMGT_reg_4:
+            return FpThree{SEM_VF_CMGT, false};
+        case Op::FACGE_2:
+        case Op::FACGE_4:
+            return FpThree{SEM_VF_ACGE, false};
+        case Op::FACGT_2:
+        case Op::FACGT_4:
+            return FpThree{SEM_VF_ACGT, false};
+        case Op::FMLA_vec_2:
+            return FpThree{SEM_VF_MLA, false};
+        case Op::FMLS_vec_2:
+            return FpThree{SEM_VF_MLS, false};
+        case Op::FADDP_vec_2:
+        case Op::FADDP_pair_2:
+            return FpThree{SEM_VF_ADD, true};
+        case Op::FMAXP_vec_2:
+        case Op::FMAXP_pair_2:
+        case Op::FMAXV_2:
+            return FpThree{SEM_VF_MAX, true};
+        case Op::FMINP_vec_2:
+        case Op::FMINP_pair_2:
+        case Op::FMINV_2:
+            return FpThree{SEM_VF_MIN, true};
+        case Op::FMAXNMP_vec_2:
+        case Op::FMAXNMP_pair_2:
+        case Op::FMAXNMV_2:
+            return FpThree{SEM_VF_MAXNM, true};
+        case Op::FMINNMP_vec_2:
+        case Op::FMINNMP_pair_2:
+        case Op::FMINNMV_2:
+            return FpThree{SEM_VF_MINNM, true};
+        default:
+            return std::nullopt;
+    }
+}
+
+// The FP two-register forms: operation and its parameters.
+struct FpTwo {
+    unsigned op;
+    unsigned rounding = SEM_ROUND_NEAREST;
+    bool is_unsigned = false;
+    bool exact = false;
+    bool current_rounding = false;
+};
+
+std::optional<FpTwo> FpTwoOf(Op op) {
+    switch (op) {
+        case Op::FABS_2:
+            return FpTwo{SEM_VF1_ABS};
+        case Op::FNEG_2:
+            return FpTwo{SEM_VF1_NEG};
+        case Op::FSQRT_2:
+            return FpTwo{SEM_VF1_SQRT};
+        case Op::FRECPE_2:
+        case Op::FRECPE_4:
+            return FpTwo{SEM_VF1_RECPE};
+        case Op::FRSQRTE_2:
+        case Op::FRSQRTE_4:
+            return FpTwo{SEM_VF1_RSQRTE};
+        case Op::FRECPX_2:
+            return FpTwo{SEM_VF1_RECPX};
+        case Op::FRINTN_2:
+            return FpTwo{SEM_VF1_ROUND, SEM_ROUND_NEAREST};
+        case Op::FRINTM_2:
+            return FpTwo{SEM_VF1_ROUND, SEM_ROUND_DOWN};
+        case Op::FRINTP_2:
+            return FpTwo{SEM_VF1_ROUND, SEM_ROUND_UP};
+        case Op::FRINTZ_2:
+            return FpTwo{SEM_VF1_ROUND, SEM_ROUND_ZERO};
+        case Op::FRINTA_2:
+            return FpTwo{SEM_VF1_ROUND, SEM_ROUND_AWAY};
+        case Op::FRINTX_2:
+            return FpTwo{SEM_VF1_ROUND, SEM_ROUND_NEAREST, false, true, true};
+        case Op::FRINTI_2:
+            return FpTwo{SEM_VF1_ROUND, SEM_ROUND_NEAREST, false, false, true};
+        case Op::FCVTNS_2:
+        case Op::FCVTNS_4:
+            return FpTwo{SEM_VF1_TO_INT, SEM_ROUND_NEAREST};
+        case Op::FCVTNU_2:
+        case Op::FCVTNU_4:
+            return FpTwo{SEM_VF1_TO_INT, SEM_ROUND_NEAREST, true};
+        case Op::FCVTMS_2:
+        case Op::FCVTMS_4:
+            return FpTwo{SEM_VF1_TO_INT, SEM_ROUND_DOWN};
+        case Op::FCVTMU_2:
+        case Op::FCVTMU_4:
+            return FpTwo{SEM_VF1_TO_INT, SEM_ROUND_DOWN, true};
+        case Op::FCVTAS_2:
+        case Op::FCVTAS_4:
+            return FpTwo{SEM_VF1_TO_INT, SEM_ROUND_AWAY};
+        case Op::FCVTAU_2:
+        case Op::FCVTAU_4:
+            return FpTwo{SEM_VF1_TO_INT, SEM_ROUND_AWAY, true};
+        case Op::FCVTPS_2:
+        case Op::FCVTPS_4:
+            return FpTwo{SEM_VF1_TO_INT, SEM_ROUND_UP};
+        case Op::FCVTPU_2:
+        case Op::FCVTPU_4:
+            return FpTwo{SEM_VF1_TO_INT, SEM_ROUND_UP, true};
+        case Op::FCVTZS_int_2:
+        case Op::FCVTZS_int_4:
+            return FpTwo{SEM_VF1_TO_INT, SEM_ROUND_ZERO};
+        case Op::FCVTZU_int_2:
+        case Op::FCVTZU_int_4:
+            return FpTwo{SEM_VF1_TO_INT, SEM_ROUND_ZERO, true};
+        case Op::SCVTF_int_2:
+        case Op::SCVTF_int_4:
+            return FpTwo{SEM_VF1_FROM_INT};
+        case Op::UCVTF_int_2:
+        case Op::UCVTF_int_4:
+            return FpTwo{SEM_VF1_FROM_INT, SEM_ROUND_NEAREST, true};
+        case Op::FCMGT_zero_2:
+        case Op::FCMGT_zero_4:
+            return FpTwo{SEM_VF1_CMGT0};
+        case Op::FCMGE_zero_2:
+        case Op::FCMGE_zero_4:
+            return FpTwo{SEM_VF1_CMGE0};
+        case Op::FCMEQ_zero_2:
+        case Op::FCMEQ_zero_4:
+            return FpTwo{SEM_VF1_CMEQ0};
+        case Op::FCMLE_2:
+        case Op::FCMLE_4:
+            return FpTwo{SEM_VF1_CMLE0};
+        case Op::FCMLT_2:
+        case Op::FCMLT_4:
+            return FpTwo{SEM_VF1_CMLT0};
+        case Op::URECPE:
+            return FpTwo{SEM_VF1_URECPE};
+        case Op::URSQRTE:
+            return FpTwo{SEM_VF1_URSQRTE};
+        default:
+            return std::nullopt;
+    }
+}
+
+bool IsScalarSimd(std::uint32_t word) { return (word >> 28) == 5 || (word >> 28) == 7; }  // 01x1 1110 / 1111
+
+StepResult SimdFloat(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    const bool scalar = IsScalarSimd(word);
+    const bool q = !scalar && ((word >> 30) & 1) != 0;
+    const bool dbl = ((word >> 22) & 1) != 0;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t d = word & 31;
+    const bool narrowing = op == Op::FCVTL || op == Op::FCVTN || op == Op::FCVTXN_2;
+    if (!scalar && !narrowing && dbl && !q) {
+        return StepResult::kUndefined;  // 1D is not an FP arrangement
+    }
+    switch (op) {
+        case Op::FMAXV_2:
+        case Op::FMINV_2:
+        case Op::FMAXNMV_2:
+        case Op::FMINNMV_2:
+            if (dbl || !q) {
+                return StepResult::kUndefined;  // 4S only
+            }
+            sem_simd_fp_reduce(&cpu, FpThreeOf(op).value_or(FpThree{SEM_VF_MAX, true}).op, false, 4, d, n);
+            return StepResult::kOk;
+        case Op::FADDP_pair_2:
+        case Op::FMAXP_pair_2:
+        case Op::FMINP_pair_2:
+        case Op::FMAXNMP_pair_2:
+        case Op::FMINNMP_pair_2:
+            sem_simd_fp_reduce(&cpu, FpThreeOf(op).value_or(FpThree{SEM_VF_ADD, true}).op, dbl, 2, d, n);
+            return StepResult::kOk;
+        case Op::FCVTL:
+            sem_simd_fcvtl(&cpu, q, dbl, d, n);
+            return StepResult::kOk;
+        case Op::FCVTN:
+            sem_simd_fcvtn(&cpu, q, false, dbl, false, d, n);
+            return StepResult::kOk;
+        case Op::FCVTXN_1:
+        case Op::FCVTXN_2:
+            if (!dbl) {
+                return StepResult::kUndefined;
+            }
+            sem_simd_fcvtn(&cpu, q, scalar, true, true, d, n);
+            return StepResult::kOk;
+        case Op::FMLA_elt_2:
+        case Op::FMLA_elt_4:
+        case Op::FMLS_elt_2:
+        case Op::FMLS_elt_4:
+        case Op::FMUL_elt_2:
+        case Op::FMUL_elt_4:
+        case Op::FMULX_elt_2:
+        case Op::FMULX_elt_4: {
+            const std::uint32_t h = (word >> 11) & 1;
+            const std::uint32_t l = (word >> 21) & 1;
+            if (dbl && l != 0) {
+                return StepResult::kUndefined;
+            }
+            const unsigned index = dbl ? h : (h << 1) | l;
+            const std::uint32_t m = (word >> 16) & 31;
+            const unsigned kind = op == Op::FMLA_elt_2 || op == Op::FMLA_elt_4   ? SEM_VF_MLA
+                                  : op == Op::FMLS_elt_2 || op == Op::FMLS_elt_4 ? SEM_VF_MLS
+                                  : op == Op::FMUL_elt_2 || op == Op::FMUL_elt_4 ? SEM_VF_MUL
+                                                                                 : SEM_VF_MULX;
+            sem_simd_fp3_v(&cpu, kind, q, scalar, false, dbl, d, sem_vread(&cpu, n),
+                           sem_broadcast(&cpu, m, index, dbl ? 8 : 4));
+            return StepResult::kOk;
+        }
+        default:
+            break;
+    }
+    if (const std::optional<FpThree> three = FpThreeOf(op)) {
+        sem_simd_fp3_v(&cpu, three->op, q, scalar, three->pairwise, dbl, d, sem_vread(&cpu, n),
+                       sem_vread(&cpu, (word >> 16) & 31));
+        return StepResult::kOk;
+    }
+    if (const std::optional<FpTwo> two = FpTwoOf(op)) {
+        if ((two->op == SEM_VF1_URECPE || two->op == SEM_VF1_URSQRTE) && dbl) {
+            return StepResult::kUndefined;
+        }
+        const unsigned rounding = two->current_rounding ? sem_fp_rounding(&cpu) : two->rounding;
+        sem_simd_fp1(&cpu, two->op, q, scalar, dbl, d, n, rounding, two->is_unsigned, 0, two->exact);
+        return StepResult::kOk;
+    }
+    return StepResult::kNotImplemented;
+}
+
+// SCVTF, UCVTF, FCVTZS, FCVTZU (vector and scalar, fixed-point): immh 01xx for single precision,
+// 1xxx for double; the rest is half precision (ARMv8.2) or reserved.
+StepResult SimdFloatFixed(BiwaCpu& cpu, std::uint32_t word, bool scalar) {
+    const bool q = !scalar && ((word >> 30) & 1) != 0;
+    const bool u = ((word >> 29) & 1) != 0;
+    const std::uint32_t immh = (word >> 19) & 15;
+    const std::uint32_t immhb = (word >> 16) & 127;
+    const bool to_fp = ((word >> 11) & 31) == 0x1C;
+    if (immh < 4) {
+        return StepResult::kUndefined;
+    }
+    const bool dbl = immh >= 8;
+    if (!scalar && dbl && !q) {
+        return StepResult::kUndefined;
+    }
+    const unsigned fbits = (dbl ? 128 : 64) - immhb;
+    sem_simd_fp1(&cpu, to_fp ? SEM_VF1_FROM_INT : SEM_VF1_TO_INT, q, scalar, dbl, word & 31, (word >> 5) & 31,
+                 SEM_ROUND_ZERO, u, fbits, false);
     return StepResult::kOk;
 }
 
@@ -1715,7 +2002,151 @@ StepResult Simd(BiwaCpu& cpu, Op op, std::uint32_t word) {
         case Op::SQDMULH_elt_1:
         case Op::SQRDMULH_elt_1:
             return SimdLong(cpu, op, word);
-        case Op::FMOV_3:    // half precision (ARMv8.2)
+        case Op::FADD_2:
+        case Op::FSUB_2:
+        case Op::FMUL_vec_2:
+        case Op::FDIV_2:
+        case Op::FMAX_2:
+        case Op::FMIN_2:
+        case Op::FMAXNM_2:
+        case Op::FMINNM_2:
+        case Op::FMULX_vec_2:
+        case Op::FMULX_vec_4:
+        case Op::FABD_2:
+        case Op::FABD_4:
+        case Op::FRECPS_2:
+        case Op::FRECPS_4:
+        case Op::FRSQRTS_2:
+        case Op::FRSQRTS_4:
+        case Op::FCMEQ_reg_2:
+        case Op::FCMEQ_reg_4:
+        case Op::FCMGE_reg_2:
+        case Op::FCMGE_reg_4:
+        case Op::FCMGT_reg_2:
+        case Op::FCMGT_reg_4:
+        case Op::FACGE_2:
+        case Op::FACGE_4:
+        case Op::FACGT_2:
+        case Op::FACGT_4:
+        case Op::FMLA_vec_2:
+        case Op::FMLS_vec_2:
+        case Op::FADDP_vec_2:
+        case Op::FADDP_pair_2:
+        case Op::FMAXP_vec_2:
+        case Op::FMAXP_pair_2:
+        case Op::FMAXV_2:
+        case Op::FMINP_vec_2:
+        case Op::FMINP_pair_2:
+        case Op::FMINV_2:
+        case Op::FMAXNMP_vec_2:
+        case Op::FMAXNMP_pair_2:
+        case Op::FMAXNMV_2:
+        case Op::FMINNMP_vec_2:
+        case Op::FMINNMP_pair_2:
+        case Op::FMINNMV_2:
+        case Op::FABS_2:
+        case Op::FNEG_2:
+        case Op::FSQRT_2:
+        case Op::FRECPE_2:
+        case Op::FRECPE_4:
+        case Op::FRSQRTE_2:
+        case Op::FRSQRTE_4:
+        case Op::FRECPX_2:
+        case Op::FRINTN_2:
+        case Op::FRINTM_2:
+        case Op::FRINTP_2:
+        case Op::FRINTZ_2:
+        case Op::FRINTA_2:
+        case Op::FRINTX_2:
+        case Op::FRINTI_2:
+        case Op::FCVTNS_2:
+        case Op::FCVTNS_4:
+        case Op::FCVTNU_2:
+        case Op::FCVTNU_4:
+        case Op::FCVTMS_2:
+        case Op::FCVTMS_4:
+        case Op::FCVTMU_2:
+        case Op::FCVTMU_4:
+        case Op::FCVTAS_2:
+        case Op::FCVTAS_4:
+        case Op::FCVTAU_2:
+        case Op::FCVTAU_4:
+        case Op::FCVTPS_2:
+        case Op::FCVTPS_4:
+        case Op::FCVTPU_2:
+        case Op::FCVTPU_4:
+        case Op::FCVTZS_int_2:
+        case Op::FCVTZS_int_4:
+        case Op::FCVTZU_int_2:
+        case Op::FCVTZU_int_4:
+        case Op::SCVTF_int_2:
+        case Op::SCVTF_int_4:
+        case Op::UCVTF_int_2:
+        case Op::UCVTF_int_4:
+        case Op::FCMGT_zero_2:
+        case Op::FCMGT_zero_4:
+        case Op::FCMGE_zero_2:
+        case Op::FCMGE_zero_4:
+        case Op::FCMEQ_zero_2:
+        case Op::FCMEQ_zero_4:
+        case Op::FCMLE_2:
+        case Op::FCMLE_4:
+        case Op::FCMLT_2:
+        case Op::FCMLT_4:
+        case Op::URECPE:
+        case Op::URSQRTE:
+        case Op::FCVTL:
+        case Op::FCVTN:
+        case Op::FCVTXN_1:
+        case Op::FCVTXN_2:
+        case Op::FMLA_elt_2:
+        case Op::FMLA_elt_4:
+        case Op::FMLS_elt_2:
+        case Op::FMLS_elt_4:
+        case Op::FMUL_elt_2:
+        case Op::FMUL_elt_4:
+        case Op::FMULX_elt_2:
+        case Op::FMULX_elt_4:
+            return SimdFloat(cpu, op, word);
+        case Op::SCVTF_fix_2:
+        case Op::UCVTF_fix_2:
+        case Op::FCVTZS_fix_2:
+        case Op::FCVTZU_fix_2:
+            return SimdFloatFixed(cpu, word, false);
+        case Op::SCVTF_fix_1:
+        case Op::UCVTF_fix_1:
+        case Op::FCVTZS_fix_1:
+        case Op::FCVTZU_fix_1:
+            return SimdFloatFixed(cpu, word, true);
+        case Op::FCMEQ_reg_1:
+        case Op::FRECPS_1:
+        case Op::FRSQRTS_1:
+        case Op::FCMEQ_zero_1:
+        case Op::FRECPE_1:
+        case Op::FRECPX_1:
+        case Op::FRSQRTE_1:
+        case Op::FMLA_elt_1:
+        case Op::FMLS_elt_1:
+        case Op::FCMEQ_reg_3:
+        case Op::FRECPS_3:
+        case Op::FRSQRTS_3:
+        case Op::FMLA_vec_1:
+        case Op::FMLS_vec_1:
+        case Op::FRINTN_1:
+        case Op::FRINTM_1:
+        case Op::FCMEQ_zero_3:
+        case Op::FABS_1:
+        case Op::FRINTP_1:
+        case Op::FRINTZ_1:
+        case Op::FRECPE_3:
+        case Op::FRINTA_1:
+        case Op::FRINTX_1:
+        case Op::FNEG_1:
+        case Op::FRINTI_1:
+        case Op::FRSQRTE_3:
+        case Op::FMLA_elt_3:
+        case Op::FMLS_elt_3:
+        case Op::FMOV_3:    // half precision (ARMv8.2), as the FP16 forms above
         case Op::SDOT_vec:  // ARMv8.2 and later: dot products, complex numbers, SHA-3, SHA-512, SM3, SM4
         case Op::UDOT_vec:
         case Op::SDOT_elt:
