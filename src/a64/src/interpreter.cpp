@@ -592,8 +592,195 @@ StepResult LoadStore(BiwaCpu& cpu, Op op, std::uint32_t word) {
     }
 }
 
-StepResult Execute(BiwaCpu& cpu, Op op, std::uint32_t word) {
+// ---- Branches and system ----
+
+// B, BL, B.cond, CBZ, CBNZ, TBZ, TBNZ, BR, BLR, RET: sets pc and `branched` when the branch is
+// taken; a branch not taken leaves pc to Step.
+StepResult Branch(BiwaCpu& cpu, Op op, std::uint32_t word, bool& branched) {
+    const Fields f{op, word};
+    std::uint64_t target = 0;
+    bool taken = true;
     switch (op) {
+        case Op::B_uncond:
+        case Op::BL:
+            target = cpu.pc + static_cast<std::uint64_t>(SignExtend(f('i'), 26) * 4);
+            if (op == Op::BL) {
+                cpu.x[30] = cpu.pc + 4;
+            }
+            break;
+        case Op::B_cond:
+            target = cpu.pc + static_cast<std::uint64_t>(SignExtend(f('i'), 19) * 4);
+            taken = sem_condition_holds(cpu.nzcv, f('c'));
+            break;
+        case Op::CBZ:
+        case Op::CBNZ:
+            target = cpu.pc + static_cast<std::uint64_t>(SignExtend(f('i'), 19) * 4);
+            taken = sem_is_zero(&cpu, f('z') != 0, f('t')) == (op == Op::CBZ);
+            break;
+        case Op::TBZ:
+        case Op::TBNZ:
+            target = cpu.pc + static_cast<std::uint64_t>(SignExtend(f('i'), 14) * 4);
+            taken = sem_bit_is_zero(&cpu, f('t'), f('b')) == (op == Op::TBZ);
+            break;
+        default:  // BR, BLR, RET: Rn is read before BLR writes the link register
+            target = sem_x(&cpu, f('n'));
+            if (op == Op::BLR) {
+                cpu.x[30] = cpu.pc + 4;
+            }
+            break;
+    }
+    if (taken) {
+        cpu.pc = target;
+        branched = true;
+    }
+    return StepResult::kOk;
+}
+
+// The system register an MRS or MSR names: op0 (2 or 3), op1, CRn, CRm, op2 packed as in the
+// instruction (bits 19..5).
+constexpr std::uint32_t SystemRegister(std::uint32_t op0, std::uint32_t op1, std::uint32_t crn, std::uint32_t crm,
+                                       std::uint32_t op2) {
+    return ((op0 & 1) << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
+}
+
+constexpr std::uint32_t kCtrEl0 = SystemRegister(3, 3, 0, 0, 1);
+constexpr std::uint32_t kDczidEl0 = SystemRegister(3, 3, 0, 0, 7);
+constexpr std::uint32_t kNzcv = SystemRegister(3, 3, 4, 2, 0);
+constexpr std::uint32_t kFpcr = SystemRegister(3, 3, 4, 4, 0);
+constexpr std::uint32_t kFpsr = SystemRegister(3, 3, 4, 4, 1);
+constexpr std::uint32_t kPmuserenrEl0 = SystemRegister(3, 3, 9, 14, 0);
+constexpr std::uint32_t kTpidrEl0 = SystemRegister(3, 3, 13, 0, 2);
+constexpr std::uint32_t kTpidrroEl0 = SystemRegister(3, 3, 13, 0, 3);
+constexpr std::uint32_t kCntfrqEl0 = SystemRegister(3, 3, 14, 0, 0);
+constexpr std::uint32_t kCntpctEl0 = SystemRegister(3, 3, 14, 0, 1);
+constexpr std::uint32_t kCntvctEl0 = SystemRegister(3, 3, 14, 0, 2);
+
+// MRS and MSR (register) on the registers EL0 may use; anything else is undefined at EL0.
+StepResult SystemRegisterAccess(BiwaCpu& cpu, std::uint32_t word, bool read) {
+    const std::uint32_t reg = (word >> 5) & 0x7FFF;
+    const std::uint32_t t = word & 31;
+    if (read) {
+        std::uint64_t value = 0;
+        switch (reg) {
+            case kCtrEl0:
+                value = SEM_CTR_EL0;
+                break;
+            case kDczidEl0:
+                value = SEM_DCZID_EL0;
+                break;
+            case kNzcv:
+                value = cpu.nzcv;
+                break;
+            case kFpcr:
+                value = cpu.fpcr;
+                break;
+            case kFpsr:
+                value = cpu.fpsr;
+                break;
+            case kPmuserenrEl0:
+                value = 0;  // no performance monitor access from EL0
+                break;
+            case kTpidrEl0:
+                value = cpu.tpidr_el0;
+                break;
+            case kTpidrroEl0:
+                value = cpu.tpidrro_el0;
+                break;
+            case kCntfrqEl0:
+                value = SEM_CNTFRQ_EL0;
+                break;
+            case kCntpctEl0:
+            case kCntvctEl0:
+                return StepResult::kNotImplemented;  // the counter comes from the runtime
+            default:
+                return StepResult::kUndefined;
+        }
+        sem_set_x(&cpu, t, value);
+        return StepResult::kOk;
+    }
+    const std::uint64_t value = sem_x(&cpu, t);
+    switch (reg) {
+        case kNzcv:
+            cpu.nzcv = static_cast<std::uint32_t>(value) & 0xF0000000;
+            break;
+        case kFpcr:
+            cpu.fpcr = static_cast<std::uint32_t>(value) & SEM_FPCR_MASK;
+            break;
+        case kFpsr:
+            cpu.fpsr = static_cast<std::uint32_t>(value) & SEM_FPSR_MASK;
+            break;
+        case kTpidrEl0:
+            cpu.tpidr_el0 = value;
+            break;
+        default:
+            return StepResult::kUndefined;
+    }
+    return StepResult::kOk;
+}
+
+StepResult System(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    switch (op) {
+        case Op::SVC:
+            cpu.pc += 4;
+            return StepResult::kSupervisorCall;
+        case Op::BRK:
+            return StepResult::kBreakpoint;
+        case Op::HINT:  // every hint Biwa does not name is a NOP on ARMv8.0 (PAC, BTI, ESB, ...)
+        case Op::NOP:
+        case Op::YIELD:
+        case Op::WFE:
+        case Op::WFI:
+        case Op::SEV:
+        case Op::SEVL:
+            return StepResult::kOk;
+        case Op::DSB:
+        case Op::DMB:
+            sem_barrier((word >> 8) & 15);
+            return StepResult::kOk;
+        case Op::ISB:
+            return StepResult::kOk;
+        case Op::MRS:
+            return SystemRegisterAccess(cpu, word, true);
+        case Op::MSR_reg:
+            return SystemRegisterAccess(cpu, word, false);
+        case Op::DC_ZVA:
+            sem_dc_zva(sem_x(&cpu, word & 31));
+            return StepResult::kOk;
+        case Op::DC_CVAC:  // cache maintenance by address: nothing to do on the host
+        case Op::DC_CVAU:
+        case Op::DC_CIVAC:
+        case Op::IC_IVAU:
+            return StepResult::kOk;
+        case Op::DC_IVAC:  // EL1 only
+        case Op::DC_ISW:
+        case Op::DC_CSW:
+        case Op::DC_CISW:
+        case Op::IC_IALLU:
+        case Op::IC_IALLUIS:
+        case Op::DC_CVAP:  // ARMv8.2
+        case Op::CFINV:    // ARMv8.4 and later
+        case Op::RMIF:
+        case Op::XAFlag:
+        case Op::AXFlag:
+            return StepResult::kUndefined;
+        default:
+            return LoadStore(cpu, op, word);
+    }
+}
+
+StepResult Execute(BiwaCpu& cpu, Op op, std::uint32_t word, bool& branched) {
+    switch (op) {
+        case Op::B_uncond:
+        case Op::BL:
+        case Op::B_cond:
+        case Op::CBZ:
+        case Op::CBNZ:
+        case Op::TBZ:
+        case Op::TBNZ:
+        case Op::BR:
+        case Op::BLR:
+        case Op::RET:
+            return Branch(cpu, op, word, branched);
         case Op::ADR:
         case Op::ADRP: {
             const std::uint32_t raw = Field(op, word, 'i');  // immlo (2 bits) then immhi (19 bits)
@@ -694,7 +881,7 @@ StepResult Execute(BiwaCpu& cpu, Op op, std::uint32_t word) {
         case Op::UMULH:
             return ThreeSource(cpu, op, word);
         default:
-            return LoadStore(cpu, op, word);
+            return System(cpu, op, word);
     }
 }
 
@@ -705,8 +892,9 @@ StepResult Step(BiwaCpu& cpu, std::uint32_t word) {
     if (!op) {
         return StepResult::kUndefined;
     }
-    const StepResult result = Execute(cpu, *op, word);
-    if (result == StepResult::kOk) {
+    bool branched = false;
+    const StepResult result = Execute(cpu, *op, word, branched);
+    if (result == StepResult::kOk && !branched) {
         cpu.pc += 4;
     }
     return result;

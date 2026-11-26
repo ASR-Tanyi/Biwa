@@ -20,7 +20,7 @@ Builders in the tests create PFS0, NCA, tickets, IVFC trees, BKTR patches, compr
 ### CPU ([04](04-cpu-recompiler.md))
 
 - **Decoder:** all 2^32 encodings against Capstone; an explicit list of what Biwa does not support.
-- **Instruction semantics:** for each instruction form, random register, flag, FP-control and memory states run on Unicorn and on Biwa's semantics; every result must match: registers, flags, memory, FPSR. Loads and stores use a block of random memory that Unicorn maps at the block's host address, with the base register pointing into it; the whole block must match afterwards. Edge cases (NaNs, denormals, overflow, shifts by register width, unaligned pairs) are listed by hand on top of the random ones.
+- **Instruction semantics:** for each instruction form, random register, flag, FP-control and memory states run on Unicorn and on Biwa's semantics; every result must match: registers, flags, memory, FPSR. Unicorn runs at EL0 with the settings Horizon gives applications (`CTR_EL0` and `DC ZVA` allowed, counters readable at 19.2 MHz), so privileged instructions fault in both. Loads, stores and branches use a block of random memory that Unicorn maps at the block's host address, with the base register and pc pointing into it; the whole block must match afterwards. Edge cases (NaNs, denormals, overflow, shifts by register width, unaligned pairs) are listed by hand on top of the random ones.
 - **Lifted C vs interpreter:** random straight-line and branching sequences assembled in the test, lifted, compiled, run, and compared with the interpreter.
 
 ### Homebrew test programs

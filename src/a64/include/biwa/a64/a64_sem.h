@@ -521,16 +521,22 @@ static inline void sem_mulh(BiwaCpu* cpu, bool is_signed, unsigned d, unsigned n
    console. Addresses come from the caller: base register, offset and writeback are the
    addressing mode's business. */
 
-/* The only places that turn a guest address into a host pointer. */
+/* The only places that turn a guest address into a host pointer. Any address may arrive, 0
+   included: an unmapped one faults on the host, and the runtime reports it as a guest data abort
+   (docs/design/04-cpu-recompiler.md, "Memory accesses"). */
+/* NOLINTBEGIN(performance-no-int-to-ptr) */
+/* NOLINTBEGIN(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
+/* NOLINTBEGIN(clang-analyzer-unix.cstring.NullArg) */
 static inline void sem_copy_in(void* host, uint64_t address, unsigned bytes) {
-    /* NOLINTNEXTLINE(performance-no-int-to-ptr,clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
     __builtin_memcpy(host, (const void*)(uintptr_t)address, bytes);
 }
 
 static inline void sem_copy_out(uint64_t address, const void* host, unsigned bytes) {
-    /* NOLINTNEXTLINE(performance-no-int-to-ptr,clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
     __builtin_memcpy((void*)(uintptr_t)address, host, bytes);
 }
+/* NOLINTEND(clang-analyzer-unix.cstring.NullArg) */
+/* NOLINTEND(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
+/* NOLINTEND(performance-no-int-to-ptr) */
 
 static inline uint64_t sem_read(uint64_t address, unsigned bytes) {
     uint64_t value = 0;
@@ -666,6 +672,45 @@ static inline uint64_t sem_ld_replicate(BiwaCpu* cpu, bool q, unsigned scale, un
         }
     }
     return (uint64_t)selem * ebytes;
+}
+
+/* ---- Branches and system ---- */
+
+/* CBZ / CBNZ and TBZ / TBNZ conditions (the branch itself is the caller's: a goto in generated
+   code, a pc update in the interpreter). */
+static inline bool sem_is_zero(const BiwaCpu* cpu, bool sf, unsigned t) { return sem_width(sf, sem_x(cpu, t)) == 0; }
+
+static inline bool sem_bit_is_zero(const BiwaCpu* cpu, unsigned t, unsigned bit) {
+    return ((sem_x(cpu, t) >> bit) & 1) == 0;
+}
+
+/* DMB and DSB: a host fence as strong as CRm asks (loads, stores, or everything). ISB needs none. */
+static inline void sem_barrier(unsigned crm) {
+    switch (crm & 3) {
+        case 1:
+            __atomic_thread_fence(__ATOMIC_ACQUIRE);
+            break;
+        case 2:
+            __atomic_thread_fence(__ATOMIC_RELEASE);
+            break;
+        default:
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            break;
+    }
+}
+
+/* The console's Cortex-A57 values of the identification registers EL0 can read. */
+#define SEM_CTR_EL0 0x8444C004u  /* 64-byte cache lines */
+#define SEM_DCZID_EL0 4u         /* DC ZVA zeroes 64 bytes */
+#define SEM_CNTFRQ_EL0 19200000u /* the system counter runs at 19.2 MHz */
+/* FPCR keeps AHP, DN, FZ, RMode, Stride and Len; the A57 has no FP exception traps (RAZ/WI). */
+#define SEM_FPCR_MASK 0x07F70000u
+#define SEM_FPSR_MASK 0xF800009Fu
+
+/* DC ZVA: zero the 64-byte block holding `address`. */
+static inline void sem_dc_zva(uint64_t address) {
+    const uint64_t zeros[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    sem_copy_out(address & ~(uint64_t)63, zeros, sizeof(zeros));
 }
 
 #ifdef __cplusplus

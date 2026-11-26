@@ -171,13 +171,56 @@ TEST(A64InterpreterTest, RunsStructureLoadsAndStores) {
     EXPECT_EQ(cpu.x[10], base + 132);
 }
 
+TEST(A64InterpreterTest, RunsBranchesAndSystemInstructions) {
+    BiwaCpu cpu = Cpu();
+    cpu.nzcv = SEM_FLAG_Z;
+    cpu.x[3] = 0xFFFFFFFF00000000;  // w3 = 0
+    cpu.x[5] = 0x2000;
+    ASSERT_EQ(Step(cpu, 0x14000002), StepResult::kOk);  // b .+8
+    EXPECT_EQ(cpu.pc, 0x1008u);
+    ASSERT_EQ(Step(cpu, 0x97FFFFFF), StepResult::kOk);  // bl .-4
+    EXPECT_EQ(cpu.pc, 0x1004u);
+    EXPECT_EQ(cpu.x[30], 0x100Cu);
+    ASSERT_EQ(Step(cpu, 0x54000201), StepResult::kOk);  // b.ne .+64 (not taken)
+    EXPECT_EQ(cpu.pc, 0x1008u);
+    ASSERT_EQ(Step(cpu, 0x34000083), StepResult::kOk);  // cbz w3, .+16
+    EXPECT_EQ(cpu.pc, 0x1018u);
+    ASSERT_EQ(Step(cpu, 0xB7E00101), StepResult::kOk);  // tbnz x1, #60, .+32
+    EXPECT_EQ(cpu.pc, 0x1038u);
+    ASSERT_EQ(Step(cpu, 0xD63F00A0), StepResult::kOk);  // blr x5
+    EXPECT_EQ(cpu.pc, 0x2000u);
+    EXPECT_EQ(cpu.x[30], 0x103Cu);
+    ASSERT_EQ(Step(cpu, 0xD65F03C0), StepResult::kOk);  // ret
+    EXPECT_EQ(cpu.pc, 0x103Cu);
+    ASSERT_EQ(Step(cpu, 0xD53B0020), StepResult::kOk);  // mrs x0, ctr_el0
+    EXPECT_EQ(cpu.x[0], 0x8444C004u);
+    cpu.x[6] = 0xFFFFFFFF;
+    ASSERT_EQ(Step(cpu, 0xD51B4406), StepResult::kOk);  // msr fpcr, x6
+    ASSERT_EQ(Step(cpu, 0xD53B4400), StepResult::kOk);  // mrs x0, fpcr
+    EXPECT_EQ(cpu.x[0], 0x07F70000u);                   // no trap enables on the A57
+    const std::uint64_t pc = cpu.pc;
+    EXPECT_EQ(Step(cpu, 0xD40004C1), StepResult::kSupervisorCall);  // svc #0x26
+    EXPECT_EQ(cpu.pc, pc + 4);
+    EXPECT_EQ(Step(cpu, 0xD4200020), StepResult::kBreakpoint);  // brk #1
+    EXPECT_EQ(cpu.pc, pc + 4);
+    alignas(64) std::array<std::uint8_t, 192> memory{};
+    memory.fill(0xEE);
+    cpu.x[7] = reinterpret_cast<std::uintptr_t>(&memory[64 + 6]);
+    ASSERT_EQ(Step(cpu, 0xD50B7427), StepResult::kOk);  // dc zva, x7
+    EXPECT_EQ(memory[63], 0xEE);
+    EXPECT_EQ(memory[64], 0);
+    EXPECT_EQ(memory[127], 0);
+    EXPECT_EQ(memory[128], 0xEE);
+    EXPECT_EQ(Step(cpu, 0xD500401F), StepResult::kUndefined);  // cfinv: ARMv8.4
+}
+
 TEST(A64InterpreterTest, RejectsWhatItCannotRun) {
     BiwaCpu cpu = Cpu();
     EXPECT_EQ(Step(cpu, 0x91800000), StepResult::kUndefined);       // add with a reserved shift
     EXPECT_EQ(Step(cpu, 0x8BC20020), StepResult::kUndefined);       // add (shifted) with ror
     EXPECT_EQ(Step(cpu, 0x5AC00C20), StepResult::kUndefined);       // rev with the 64-bit opc on w
     EXPECT_EQ(Step(cpu, 0x00000000), StepResult::kUndefined);       // udf
-    EXPECT_EQ(Step(cpu, 0xD65F03C0), StepResult::kNotImplemented);  // ret, not yet
+    EXPECT_EQ(Step(cpu, 0xC85F7C20), StepResult::kNotImplemented);  // ldxr x0, [x1], not yet
     EXPECT_EQ(cpu.pc, 0x1000u);
 }
 

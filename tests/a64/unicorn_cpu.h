@@ -13,7 +13,8 @@ struct uc_struct;
 
 namespace biwa::test {
 
-// Unicorn as the reference A64 CPU for tests (a Cortex-A57 model, like the console's).
+// Unicorn as the reference A64 CPU for tests (a Cortex-A57 model, like the console's), running at
+// EL0 with the system settings Horizon gives applications.
 // Memory: code at kCodeAddress, and one data region (by default kDataSize bytes at kDataAddress)
 // that can also hold code.
 class UnicornCpu {
@@ -39,8 +40,8 @@ class UnicornCpu {
     };
 
     // Places `code` at state.pc when that lies in the data region, otherwise at kCodeAddress (and
-    // starts there), runs until pc passes the last instruction (or the CPU takes an exception), and
-    // returns the state then.
+    // starts there), runs until pc passes the last instruction, a branch leaves the code (its
+    // target must be mapped), or the CPU takes an exception, and returns the state then.
     Outcome Run(const CpuState& state, std::span<const std::uint32_t> code);
 
    private:
@@ -50,6 +51,7 @@ class UnicornCpu {
     uc_struct* uc_ = nullptr;
     std::uint64_t data_address_;
     std::uint64_t data_size_;
+    std::uint64_t sctlr_ = 0;
 };
 
 }  // namespace biwa::test
