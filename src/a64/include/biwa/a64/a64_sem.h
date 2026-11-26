@@ -1073,6 +1073,242 @@ static inline uint32_t sem_fcmp(BiwaCpu* cpu, bool dbl, uint64_t a, uint64_t b, 
     return x < y ? SEM_FLAG_N : SEM_FLAG_C;
 }
 
+/* ---- Floating point: arithmetic ---- */
+
+static inline uint64_t sem_fp_default_nan(bool dbl) { return dbl ? 0x7FF8000000000000u : 0x7FC00000u; }
+
+static inline bool sem_fp_is_qnan(bool dbl, uint64_t x) {
+    return sem_fp_is_nan(dbl, x) && (x & sem_fp_quiet_bit(dbl)) != 0;
+}
+
+static inline bool sem_fp_is_infinity(bool dbl, uint64_t x) { return sem_fp_magnitude(dbl, x) == sem_fp_infinity(dbl); }
+
+static inline bool sem_fp_is_zero(bool dbl, uint64_t x) { return sem_fp_magnitude(dbl, x) == 0; }
+
+/* A NaN operand's result: quieted (a signalling one raises IOC), or the default NaN with FPCR.DN. */
+static inline uint64_t sem_fp_process_nan(BiwaCpu* cpu, bool dbl, uint64_t nan) {
+    if (sem_fp_is_snan(dbl, nan)) {
+        cpu->fpsr |= SEM_FPSR_IOC;
+    }
+    if ((cpu->fpcr & SEM_FPCR_DN) != 0) {
+        return sem_fp_default_nan(dbl);
+    }
+    return nan | sem_fp_quiet_bit(dbl);
+}
+
+/* With NaN operands (at least one): the first signalling NaN, else the first quiet one. */
+static inline uint64_t sem_fp_process_nans(BiwaCpu* cpu, bool dbl, uint64_t a, uint64_t b, uint64_t c, unsigned count) {
+    const uint64_t operands[3] = {a, b, c};
+    for (unsigned i = 0; i < count; ++i) {
+        if (sem_fp_is_snan(dbl, operands[i])) {
+            return sem_fp_process_nan(cpu, dbl, operands[i]);
+        }
+    }
+    for (unsigned i = 0; i < count; ++i) {
+        if (sem_fp_is_nan(dbl, operands[i])) {
+            return sem_fp_process_nan(cpu, dbl, operands[i]);
+        }
+    }
+    return sem_fp_default_nan(dbl);
+}
+
+enum { SEM_FP_ADD, SEM_FP_SUB, SEM_FP_MUL, SEM_FP_DIV, SEM_FP_SQRT, SEM_FP_MULADD };
+
+/* The host operation (MULADD: a * b + c, fused), rounded in the host's rounding mode and raising
+   the host's flags. FENV_ACCESS keeps the compiler from folding it or moving it past changes of
+   the rounding mode or flags. */
+static inline uint64_t sem_fp_host_op(bool dbl, unsigned op, uint64_t a, uint64_t b, uint64_t c) {
+#pragma STDC FENV_ACCESS ON
+#pragma clang fp contract(off)
+    if (dbl) {
+        const double x = sem_f64(a);
+        const double y = sem_f64(b);
+        double r = 0;
+        switch (op) {
+            case SEM_FP_ADD:
+                r = x + y;
+                break;
+            case SEM_FP_SUB:
+                r = x - y;
+                break;
+            case SEM_FP_MUL:
+                r = x * y;
+                break;
+            case SEM_FP_DIV:
+                r = x / y;
+                break;
+            case SEM_FP_SQRT:
+                r = __builtin_sqrt(x);
+                break;
+            default:
+                r = __builtin_fma(x, y, sem_f64(c));
+                break;
+        }
+        return sem_f64_bits(r);
+    }
+    const float x = sem_f32((uint32_t)a);
+    const float y = sem_f32((uint32_t)b);
+    float r = 0;
+    switch (op) {
+        case SEM_FP_ADD:
+            r = x + y;
+            break;
+        case SEM_FP_SUB:
+            r = x - y;
+            break;
+        case SEM_FP_MUL:
+            r = x * y;
+            break;
+        case SEM_FP_DIV:
+            r = x / y;
+            break;
+        case SEM_FP_SQRT:
+            r = __builtin_sqrtf(x);
+            break;
+        default:
+            r = __builtin_fmaf(x, y, sem_f32((uint32_t)c));
+            break;
+    }
+    return sem_f32_bits(r);
+}
+
+/* The host's raw flags, when one operation's own flags must be told apart from earlier ones. */
+#if defined(__x86_64__)
+#define SEM_HOST_UNDERFLOW 0x10u
+#define SEM_HOST_INEXACT 0x20u
+static inline uint32_t sem_host_raw_flags(void) { return _mm_getcsr() & SEM_MXCSR_FLAGS; }
+static inline void sem_host_set_raw_flags(uint32_t flags) { _mm_setcsr((_mm_getcsr() & ~SEM_MXCSR_FLAGS) | flags); }
+#else
+#define SEM_HOST_UNDERFLOW ((uint32_t)FE_UNDERFLOW)
+#define SEM_HOST_INEXACT ((uint32_t)FE_INEXACT)
+static inline uint32_t sem_host_raw_flags(void) { return (uint32_t)fetestexcept(FE_ALL_EXCEPT); }
+static inline void sem_host_set_raw_flags(uint32_t flags) {
+    feclearexcept(FE_ALL_EXCEPT);
+    feraiseexcept((int)flags);
+}
+#endif
+
+/* Whether a result the host rounded to the smallest normal magnitude was below it before rounding:
+   ARM detects tininess before rounding, x86 after. Rounded towards zero, such a result stays
+   below. */
+static inline bool sem_fp_tiny_before_rounding(bool dbl, unsigned op, uint64_t a, uint64_t b, uint64_t c) {
+#if defined(__x86_64__)
+    const unsigned csr = _mm_getcsr();
+    _mm_setcsr(csr | SEM_MXCSR_RC);
+    const uint64_t truncated = sem_fp_host_op(dbl, op, a, b, c);
+    _mm_setcsr((_mm_getcsr() & ~SEM_MXCSR_RC) | (csr & SEM_MXCSR_RC));
+#else
+    const int rounding = fegetround();
+    fesetround(FE_TOWARDZERO);
+    const uint64_t truncated = sem_fp_host_op(dbl, op, a, b, c);
+    fesetround(rounding);
+#endif
+    return sem_fp_magnitude(dbl, truncated) < sem_fp_min_normal(dbl);
+}
+
+/* An operation on operands that are not NaNs (already read with FZ): the host computes it; an
+   invalid operation's NaN becomes ARM's default NaN (x86's is negative); a result tiny before
+   rounding raises UFC, and with FZ becomes a zero of its sign raising UFC alone (not IXC). */
+static inline uint64_t sem_fp_arith(BiwaCpu* cpu, bool dbl, unsigned op, uint64_t a, uint64_t b, uint64_t c) {
+    const bool flush = (cpu->fpcr & SEM_FPCR_FZ) != 0;
+    uint32_t earlier = 0;
+    if (flush) {
+        earlier = sem_host_raw_flags();
+        sem_host_set_raw_flags(0);
+    }
+    uint64_t r = sem_fp_host_op(dbl, op, a, b, c);
+    if (sem_fp_is_nan(dbl, r)) {
+        r = sem_fp_default_nan(dbl);
+    } else {
+        const uint64_t magnitude = sem_fp_magnitude(dbl, r);
+        const uint64_t min_normal = sem_fp_min_normal(dbl);
+        bool tiny = magnitude != 0 && magnitude < min_normal;
+        if (magnitude == min_normal && sem_fp_tiny_before_rounding(dbl, op, a, b, c)) {
+            tiny = true;
+            cpu->fpsr |= SEM_FPSR_UFC;
+        }
+        if (flush && (sem_host_raw_flags() & SEM_HOST_UNDERFLOW) != 0) {
+            tiny = true;  // rounded to zero (only this operation's flags are raised here)
+        }
+        if (flush && tiny) {
+            r &= sem_fp_sign_bit(dbl);
+            cpu->fpsr |= SEM_FPSR_UFC;
+            sem_host_set_raw_flags(sem_host_raw_flags() & ~(SEM_HOST_UNDERFLOW | SEM_HOST_INEXACT));
+        }
+    }
+    if (flush) {
+        sem_host_set_raw_flags(earlier | sem_host_raw_flags());
+    }
+    return r;
+}
+
+/* FADD, FSUB, FMUL, FDIV. */
+static inline uint64_t sem_fp_binary(BiwaCpu* cpu, bool dbl, unsigned op, uint64_t a, uint64_t b) {
+    a = sem_fp_operand(cpu, dbl, a);
+    b = sem_fp_operand(cpu, dbl, b);
+    if (sem_fp_is_nan(dbl, a) || sem_fp_is_nan(dbl, b)) {
+        return sem_fp_process_nans(cpu, dbl, a, b, 0, 2);
+    }
+    return sem_fp_arith(cpu, dbl, op, a, b, 0);
+}
+
+/* FSQRT. */
+static inline uint64_t sem_fp_sqrt(BiwaCpu* cpu, bool dbl, uint64_t a) {
+    a = sem_fp_operand(cpu, dbl, a);
+    if (sem_fp_is_nan(dbl, a)) {
+        return sem_fp_process_nan(cpu, dbl, a);
+    }
+    return sem_fp_arith(cpu, dbl, SEM_FP_SQRT, a, 0, 0);
+}
+
+/* FMADD and, with operands negated by the caller, FMSUB, FNMADD, FNMSUB: addend + a * b, fused.
+   NaNs: the addend first; a quiet NaN addend with infinity times zero gives the default NaN and
+   IOC. */
+static inline uint64_t sem_fp_muladd(BiwaCpu* cpu, bool dbl, uint64_t addend, uint64_t a, uint64_t b) {
+    addend = sem_fp_operand(cpu, dbl, addend);
+    a = sem_fp_operand(cpu, dbl, a);
+    b = sem_fp_operand(cpu, dbl, b);
+    if (sem_fp_is_nan(dbl, addend) || sem_fp_is_nan(dbl, a) || sem_fp_is_nan(dbl, b)) {
+        const bool infinity_times_zero = (sem_fp_is_infinity(dbl, a) && sem_fp_is_zero(dbl, b)) ||
+                                         (sem_fp_is_zero(dbl, a) && sem_fp_is_infinity(dbl, b));
+        if (sem_fp_is_qnan(dbl, addend) && infinity_times_zero) {
+            cpu->fpsr |= SEM_FPSR_IOC;
+            return sem_fp_default_nan(dbl);
+        }
+        return sem_fp_process_nans(cpu, dbl, addend, a, b, 3);
+    }
+    return sem_fp_arith(cpu, dbl, SEM_FP_MULADD, a, b, addend);
+}
+
+/* FMAX, FMIN, and with `number` FMAXNM, FMINNM (a quiet NaN against a number gives the number).
+   Exact: no host arithmetic. Of two zeros, max is +0 unless both are -0, min -0 unless both are +0. */
+static inline uint64_t sem_fp_max(BiwaCpu* cpu, bool dbl, uint64_t a, uint64_t b, bool max, bool number) {
+    a = sem_fp_operand(cpu, dbl, a);
+    b = sem_fp_operand(cpu, dbl, b);
+    if (number) {
+        const uint64_t loser = sem_fp_infinity(dbl) | (max ? sem_fp_sign_bit(dbl) : 0);
+        const bool quiet_a = sem_fp_is_qnan(dbl, a);
+        const bool quiet_b = sem_fp_is_qnan(dbl, b);
+        if (quiet_a && !quiet_b) {
+            a = loser;
+        } else if (!quiet_a && quiet_b) {
+            b = loser;
+        }
+    }
+    if (sem_fp_is_nan(dbl, a) || sem_fp_is_nan(dbl, b)) {
+        return sem_fp_process_nans(cpu, dbl, a, b, 0, 2);
+    }
+    if (sem_fp_is_zero(dbl, a) && sem_fp_is_zero(dbl, b)) {
+        return max ? (a & b) : (a | b);
+    }
+    const double x = sem_fp_value(dbl, a);
+    const double y = sem_fp_value(dbl, b);
+    if (max) {
+        return x > y ? a : b;
+    }
+    return x < y ? a : b;
+}
+
 #ifdef __cplusplus
 }
 #pragma clang diagnostic pop

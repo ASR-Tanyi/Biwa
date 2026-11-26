@@ -39,3 +39,5 @@ biwa_add_module(a64 LAYER 1
     SOURCES src/decoder.cpp src/interpreter.cpp
     DEPS core)
 target_include_directories(biwa_a64 PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/generated)
+# The FP semantics rely on the host's sqrt and fma instructions, which set no errno.
+target_compile_options(biwa_a64 PRIVATE -fno-math-errno)

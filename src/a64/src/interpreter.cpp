@@ -853,6 +853,48 @@ StepResult FloatingPoint(BiwaCpu& cpu, Op op, std::uint32_t word) {
             cpu.nzcv = sem_fcmp(&cpu, dbl, sem_v_get(&cpu, n, bytes), b, op == Op::FCMPE_float);
             break;
         }
+        case Op::FADD_float:
+        case Op::FSUB_float:
+        case Op::FMUL_float:
+        case Op::FDIV_float:
+        case Op::FNMUL_float: {
+            const unsigned kind = op == Op::FADD_float   ? SEM_FP_ADD
+                                  : op == Op::FSUB_float ? SEM_FP_SUB
+                                  : op == Op::FDIV_float ? SEM_FP_DIV
+                                                         : SEM_FP_MUL;
+            std::uint64_t result = sem_fp_binary(&cpu, dbl, kind, sem_v_get(&cpu, n, bytes), sem_v_get(&cpu, m, bytes));
+            if (op == Op::FNMUL_float) {
+                result ^= sign;  // negated after the multiply, default NaN included
+            }
+            sem_v_set(&cpu, d, bytes, result);
+            break;
+        }
+        case Op::FSQRT_float:
+            sem_v_set(&cpu, d, bytes, sem_fp_sqrt(&cpu, dbl, sem_v_get(&cpu, n, bytes)));
+            break;
+        case Op::FMAX_float:
+        case Op::FMIN_float:
+        case Op::FMAXNM_float:
+        case Op::FMINNM_float: {
+            const bool max = op == Op::FMAX_float || op == Op::FMAXNM_float;
+            const bool number = op == Op::FMAXNM_float || op == Op::FMINNM_float;
+            sem_v_set(&cpu, d, bytes,
+                      sem_fp_max(&cpu, dbl, sem_v_get(&cpu, n, bytes), sem_v_get(&cpu, m, bytes), max, number));
+            break;
+        }
+        case Op::FMADD_float:
+        case Op::FMSUB_float:
+        case Op::FNMADD_float:
+        case Op::FNMSUB_float: {
+            // FMSUB: a - n * m; FNMADD: -a - n * m; FNMSUB: -a + n * m. The negations come before
+            // the operation, so a NaN operand keeps its flipped sign.
+            const bool negate_product = op == Op::FMSUB_float || op == Op::FNMADD_float;
+            const bool negate_addend = op == Op::FNMADD_float || op == Op::FNMSUB_float;
+            const std::uint64_t addend = sem_v_get(&cpu, (word >> 10) & 31, bytes) ^ (negate_addend ? sign : 0);
+            const std::uint64_t a = sem_v_get(&cpu, n, bytes) ^ (negate_product ? sign : 0);
+            sem_v_set(&cpu, d, bytes, sem_fp_muladd(&cpu, dbl, addend, a, sem_v_get(&cpu, m, bytes)));
+            break;
+        }
         case Op::FCCMP_float:
         case Op::FCCMPE_float:
             if (sem_condition_holds(cpu.nzcv, (word >> 12) & 15)) {
@@ -940,6 +982,20 @@ StepResult System(BiwaCpu& cpu, Op op, std::uint32_t word) {
         case Op::FCMPE_float:
         case Op::FCCMP_float:
         case Op::FCCMPE_float:
+        case Op::FADD_float:
+        case Op::FSUB_float:
+        case Op::FMUL_float:
+        case Op::FDIV_float:
+        case Op::FNMUL_float:
+        case Op::FSQRT_float:
+        case Op::FMAX_float:
+        case Op::FMIN_float:
+        case Op::FMAXNM_float:
+        case Op::FMINNM_float:
+        case Op::FMADD_float:
+        case Op::FMSUB_float:
+        case Op::FNMADD_float:
+        case Op::FNMSUB_float:
             return FloatingPoint(cpu, op, word);
         default:
             return LoadStore(cpu, op, word);

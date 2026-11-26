@@ -91,9 +91,20 @@ struct Tally {
     int exceptions = 0;  // undefined, SVC, BRK
 };
 
+// The state a failing sample started from, as far as the FP forms read it.
+std::string Inputs(std::uint32_t word, const CpuState& in) {
+    std::string out = std::format("fpcr {:#x} fpsr {:#x} nzcv {:#x}", in.fpcr, in.fpsr, in.nzcv);
+    for (const std::uint32_t r : {(word >> 5) & 31, (word >> 16) & 31, (word >> 10) & 31}) {
+        std::uint64_t low = 0;
+        std::memcpy(&low, in.v[r].data(), 8);
+        out += std::format(", v{} {:016x}", r, low);
+    }
+    return out;
+}
+
 // Compares one step of Biwa with Unicorn's run of the same word from the same state.
 void Compare(const biwa::a64::OpInfo& info, std::uint32_t word, StepResult result, const BiwaCpu& cpu,
-             const UnicornCpu::Outcome& reference, Tally& tally) {
+             const UnicornCpu::Outcome& reference, Tally& tally, const CpuState& in) {
     ++tally.run;
     if (result == StepResult::kUndefined || result == StepResult::kSupervisorCall ||
         result == StepResult::kBreakpoint || result == StepResult::kAlignmentFault) {
@@ -104,7 +115,8 @@ void Compare(const biwa::a64::OpInfo& info, std::uint32_t word, StepResult resul
     ASSERT_EQ(result, StepResult::kOk) << std::format("{:08x}", word);
     ASSERT_TRUE(reference.completed) << std::format("{:08x}: Unicorn: {}", word, reference.error);
     const std::string diff = biwa::test::Diff(reference.state, biwa::test::FromBiwa(cpu));
-    ASSERT_EQ(diff, "") << std::format("{:08x} ({}), Unicorn != Biwa:\n", word, info.name) << diff;
+    ASSERT_EQ(diff, "") << std::format("{:08x} ({}) from {}, Unicorn != Biwa:\n", word, info.name, Inputs(word, in))
+                        << diff;
 }
 
 std::uint64_t Seed(Op op) { return static_cast<std::uint64_t>(op) * 7919 + 1; }
@@ -137,13 +149,94 @@ TEST_P(SemanticsTest, MatchesUnicorn) {
         AdjustForUnicorn(op, word, in);
         BiwaCpu cpu = biwa::test::ToBiwa(in);
         const StepResult result = GuestStep(cpu, word);
-        Compare(info, word, result, cpu, unicorn.Run(in, std::array<std::uint32_t, 1>{word}), tally);
+        Compare(info, word, result, cpu, unicorn.Run(in, std::array<std::uint32_t, 1>{word}), tally, in);
         if (HasFatalFailure()) {
             return;
         }
     }
     EXPECT_EQ(tally.run, kSamples);
     EXPECT_LT(tally.exceptions, tally.run);
+}
+
+// Hand-picked FP operands that random states rarely produce (tininess on either side of the
+// smallest normal, invalid operations, signed zeros, NaN rules), each under several FPCR settings,
+// against Unicorn. Registers: d0 = op(d1, d2) or d3 + d1 * d2 (s0 ... for single precision).
+struct FpCase {
+    std::uint32_t word;
+    std::uint64_t n;
+    std::uint64_t m;
+    std::uint64_t a;
+};
+
+constexpr std::uint32_t kFmaddD = 0x1F420C20;
+constexpr std::uint32_t kFmaddS = 0x1F020C20;
+constexpr std::uint32_t kFmulD = 0x1E620820;
+constexpr std::uint32_t kFmulS = 0x1E220820;
+constexpr std::uint32_t kFaddS = 0x1E222820;
+constexpr std::uint32_t kFsubD = 0x1E623820;
+constexpr std::uint32_t kFdivD = 0x1E621820;
+constexpr std::uint32_t kFsqrtD = 0x1E61C020;
+constexpr std::uint32_t kFmaxD = 0x1E624820;
+constexpr std::uint32_t kFminD = 0x1E625820;
+constexpr std::uint32_t kFmaxnmD = 0x1E626820;
+constexpr std::uint32_t kFnmulD = 0x1E628820;
+
+constexpr std::array kFpCases = {
+    // Just below the smallest normal before rounding, rounded up to it: tiny on ARM, not on x86.
+    FpCase{kFmaddD, 0x9D90000000000000, 0x1D90000000000000, 0x0010000000000000},
+    FpCase{kFmaddD, 0x1D90000000000000, 0x1D90000000000000, 0x0010000000000000},
+    FpCase{kFmulD, 0x000FFFFFFFFFFFFF, 0x3FF0000000000001, 0},
+    FpCase{kFmulS, 0x007FFFFF, 0x3F800001, 0},
+    FpCase{kFmulS, 0x00800000, 0x3F7FFFFF, 0},
+    FpCase{kFmaddS, 0x8C800000, 0x0C800000, 0x00800000},
+    // An exact denormal result, an underflow to zero, an overflow.
+    FpCase{kFmulD, 0x0010000000000000, 0x3FE0000000000000, 0},
+    FpCase{kFmulD, 0x0010000000000001, 0x3C90000000000000, 0},
+    FpCase{kFmulD, 0x7FEFFFFFFFFFFFFF, 0x4000000000000000, 0},
+    // Denormal operands (IDC with FZ).
+    FpCase{kFaddS, 0x00000001, 0x80400000, 0},
+    // Signed zeros, invalid operations, division by zero.
+    FpCase{kFsubD, 0x3FF0000000000000, 0x3FF0000000000000, 0},
+    FpCase{kFsubD, 0x7FF0000000000000, 0x7FF0000000000000, 0},
+    FpCase{kFdivD, 0, 0, 0},
+    FpCase{kFdivD, 0x3FF0000000000000, 0x8000000000000000, 0},
+    FpCase{kFsqrtD, 0xBFF0000000000000, 0, 0},
+    FpCase{kFsqrtD, 0x8000000000000000, 0, 0},
+    FpCase{kFnmulD, 0, 0x7FF0000000000000, 0},
+    FpCase{kFmaddD, 0x7FF0000000000000, 0, 0x7FF8000000000001},
+    FpCase{kFmaddD, 0x7FF0000000000000, 0, 0x7FF0000000000001},
+    FpCase{kFmaddS, 0x7FA00000, 0x7FC00001, 0x7FC00002},
+    // Max and min of zeros, NaN against a number.
+    FpCase{kFmaxD, 0, 0x8000000000000000, 0},
+    FpCase{kFminD, 0, 0x8000000000000000, 0},
+    FpCase{kFmaxnmD, 0x7FF8000000000005, 0x3FF0000000000000, 0},
+    FpCase{kFmaxnmD, 0x7FF0000000000005, 0x3FF0000000000000, 0},
+    FpCase{kFmaxD, 0x7FF8000000000005, 0x3FF0000000000000, 0},
+};
+
+// FPCR: nearest, +inf, -inf, zero; with FZ; with DN; all three.
+constexpr std::array<std::uint32_t, 8> kFpcrs = {
+    0, 1u << 22, 2u << 22, 3u << 22, 1u << 24, (1u << 24) | (1u << 22), 1u << 25, (7u << 24) | (2u << 22)};
+
+TEST(DirectedFpTest, MatchesUnicorn) {
+    UnicornCpu unicorn;
+    for (const FpCase& c : kFpCases) {
+        for (const std::uint32_t fpcr : kFpcrs) {
+            CpuState in;
+            in.pc = UnicornCpu::kCodeAddress;
+            in.fpcr = fpcr;
+            for (std::size_t i = 0; i < 4; ++i) {
+                const std::uint64_t value = i == 1 ? c.n : i == 2 ? c.m : i == 3 ? c.a : 0x5555555555555555;
+                std::memcpy(in.v[i].data(), &value, 8);
+            }
+            BiwaCpu cpu = biwa::test::ToBiwa(in);
+            ASSERT_EQ(GuestStep(cpu, c.word), StepResult::kOk);
+            const UnicornCpu::Outcome reference = unicorn.Run(in, std::array<std::uint32_t, 1>{c.word});
+            ASSERT_TRUE(reference.completed);
+            EXPECT_EQ(biwa::test::Diff(reference.state, biwa::test::FromBiwa(cpu)), "")
+                << std::format("{:08x} from {}", c.word, Inputs(c.word, in));
+        }
+    }
 }
 
 // Forms that always take an exception at EL0: SVC and BRK, and the forms that are privileged or
@@ -365,7 +458,7 @@ TEST_P(MemorySemanticsTest, MatchesUnicorn) {
         const StepResult result = GuestStep(cpu, word);
         const std::string memory = rig.MemoryDiff();
         ASSERT_EQ(memory, "") << std::format("{:08x} ({})", word, info.name);
-        Compare(info, word, result, cpu, reference, tally);
+        Compare(info, word, result, cpu, reference, tally, in);
         if (HasFatalFailure()) {
             return;
         }
@@ -517,6 +610,14 @@ INSTANTIATE_TEST_SUITE_P(FloatMoves, SemanticsTest,
                          testing::Values(Op::FMOV_float, Op::FABS_float, Op::FNEG_float, Op::FMOV_float_imm,
                                          Op::FMOV_float_gen, Op::FCSEL_float, Op::FCMP_float, Op::FCMPE_float,
                                          Op::FCCMP_float, Op::FCCMPE_float),
+                         Name);
+
+// Floating point: arithmetic.
+INSTANTIATE_TEST_SUITE_P(FloatArithmetic, SemanticsTest,
+                         testing::Values(Op::FADD_float, Op::FSUB_float, Op::FMUL_float, Op::FDIV_float,
+                                         Op::FNMUL_float, Op::FSQRT_float, Op::FMAX_float, Op::FMIN_float,
+                                         Op::FMAXNM_float, Op::FMINNM_float, Op::FMADD_float, Op::FMSUB_float,
+                                         Op::FNMADD_float, Op::FNMSUB_float),
                          Name);
 
 }  // namespace

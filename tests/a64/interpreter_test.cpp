@@ -311,13 +311,52 @@ TEST(A64InterpreterTest, RunsFloatingPointMovesAndCompares) {
     EXPECT_EQ(cpu.nzcv, SEM_FLAG_Z | SEM_FLAG_C);
 }
 
+// d0 = op(d1, d2) or d3 + d1 * d2, under `fpcr`; returns d0 and leaves FPSR in cpu.
+std::uint64_t RunFp(BiwaCpu& cpu, std::uint32_t word, std::uint32_t fpcr, std::uint64_t n, std::uint64_t m,
+                    std::uint64_t a = 0) {
+    cpu.fpcr = fpcr;
+    cpu.fpsr = 0;
+    std::memcpy(cpu.v[1], &n, 8);
+    std::memcpy(cpu.v[2], &m, 8);
+    std::memcpy(cpu.v[3], &a, 8);
+    sem_fp_enter(&cpu);
+    EXPECT_EQ(Step(cpu, word), StepResult::kOk);
+    sem_fp_fold(&cpu);
+    return Low(cpu, 0);
+}
+
+TEST(A64InterpreterTest, RunsFloatingPointArithmeticAsTheA57) {
+    BiwaCpu cpu = Cpu();
+    constexpr std::uint32_t kFz = SEM_FPCR_FZ;
+    constexpr std::uint32_t kRoundDown = 2u << SEM_FPCR_RMODE_SHIFT;
+    // fmadd d0, d1, d2, d3: min normal - 2^-1100 rounds to min normal; ARM calls it tiny (before
+    // rounding), x86 would not.
+    EXPECT_EQ(RunFp(cpu, 0x1F420C20, 0, 0x9D90000000000000, 0x1D90000000000000, 0x0010000000000000),
+              0x0010000000000000u);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_UFC | SEM_FPSR_IXC);
+    // The same with FZ: flushed to zero, UFC alone.
+    EXPECT_EQ(RunFp(cpu, 0x1F420C20, kFz, 0x9D90000000000000, 0x1D90000000000000, 0x0010000000000000), 0u);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_UFC);
+    // fsub d0, d1, d2: inf - inf is ARM's default NaN (positive), 1 - 1 rounding down is -0.
+    EXPECT_EQ(RunFp(cpu, 0x1E623820, 0, 0x7FF0000000000000, 0x7FF0000000000000), 0x7FF8000000000000u);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_IOC);
+    EXPECT_EQ(RunFp(cpu, 0x1E623820, kRoundDown, 0x3FF0000000000000, 0x3FF0000000000000), 0x8000000000000000u);
+    // fdiv d0, d1, d2: 1 / -0.
+    EXPECT_EQ(RunFp(cpu, 0x1E621820, 0, 0x3FF0000000000000, 0x8000000000000000), 0xFFF0000000000000u);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_DZC);
+    // fmaxnm d0, d1, d2: a quiet NaN loses to a number; a signalling one does not.
+    EXPECT_EQ(RunFp(cpu, 0x1E626820, 0, 0x7FF8000000000005, 0x3FF0000000000000), 0x3FF0000000000000u);
+    EXPECT_EQ(RunFp(cpu, 0x1E626820, 0, 0x7FF0000000000005, 0x3FF0000000000000), 0x7FF8000000000005u);
+    EXPECT_EQ(cpu.fpsr, SEM_FPSR_IOC);
+}
+
 TEST(A64InterpreterTest, RejectsWhatItCannotRun) {
     BiwaCpu cpu = Cpu();
     EXPECT_EQ(Step(cpu, 0x91800000), StepResult::kUndefined);       // add with a reserved shift
     EXPECT_EQ(Step(cpu, 0x8BC20020), StepResult::kUndefined);       // add (shifted) with ror
     EXPECT_EQ(Step(cpu, 0x5AC00C20), StepResult::kUndefined);       // rev with the 64-bit opc on w
     EXPECT_EQ(Step(cpu, 0x00000000), StepResult::kUndefined);       // udf
-    EXPECT_EQ(Step(cpu, 0x1E222820), StepResult::kNotImplemented);  // fadd s0, s1, s2, not yet
+    EXPECT_EQ(Step(cpu, 0x1E380020), StepResult::kNotImplemented);  // fcvtzs w0, s1, not yet
     EXPECT_EQ(cpu.pc, 0x1000u);
 }
 

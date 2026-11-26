@@ -98,9 +98,11 @@ Generated code is C17 compiled with `-fno-strict-aliasing`, so guest memory acce
 
 ## Floating point and SIMD
 
-- Rounding mode and flush-to-zero follow `FPCR`: writing `FPCR` sets the thread's MXCSR (rounding, FTZ, DAZ).
-- NaN rules differ between x86 and AArch64 (which NaN propagates, default NaN). The semantic helpers implement AArch64's rules; fused multiply-add uses `fma` (FMA3), never a separate multiply and add.
-- `FPSR`'s cumulative flags are produced from MXCSR's flags when `FPSR` is read.
+- The rounding mode follows `FPCR`: writing `FPCR` sets the rounding field of the thread's MXCSR. The host's FTZ and DAZ stay off.
+- The host computes; the helpers make the result ARM's. NaN operands are handled before the host sees them (the first signalling NaN, else the first quiet one; `FPCR.DN`); an invalid operation's NaN becomes ARM's default NaN (x86's is negative); fused multiply-add uses FMA3, never a separate multiply and add.
+- Flush-to-zero is done by the helpers: a denormal operand reads as zero and raises `IDC`; a tiny result becomes zero and raises `UFC` alone (x86 would add `IXC`). ARM detects tininess before rounding, x86 after: a result that rounded to the smallest normal is recomputed rounding towards zero to tell, which costs nothing on other results. With `FZ` set, the helpers save and restore MXCSR's flags around each operation to tell its own flags apart.
+- `FPSR`'s cumulative flags: those the host raises gather in MXCSR and are folded into `FPSR` when it is read and when guest code stops; those only the helpers know go to `FPSR` directly. The runtime saves the guest's MXCSR and restores the host's when it leaves guest code (an SVC, a host callback).
+- The helpers' host operations are compiled with `#pragma STDC FENV_ACCESS ON` and contraction off, so the compiler neither folds them nor moves them past changes of the rounding mode or flags.
 - AdvSIMD uses Clang vector types (`uint8x16`, `float32x4`, …) and SSE / AVX2 intrinsics where Clang does not pick the right instruction.
 - Crypto: AES-NI and SHA-NI when the CPU has them, portable C otherwise.
 
