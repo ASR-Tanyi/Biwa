@@ -5,7 +5,9 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
+#include <cstring>
 
 #include "biwa/a64/a64_sem.h"
 
@@ -84,6 +86,57 @@ TEST(A64InterpreterTest, RunsDataProcessingRegister) {
     EXPECT_EQ(cpu.x[0], 0x0112233445566777u);
     ASSERT_EQ(Step(cpu, 0x9B020C20), StepResult::kOk);  // madd x0, x1, x2, x3
     EXPECT_EQ(cpu.x[0], 0x8675645342312010u);
+}
+
+TEST(A64InterpreterTest, RunsLoadsAndStores) {
+    // Guest addresses are host addresses: point the base register into a local buffer.
+    alignas(16) std::array<std::uint8_t, 256> memory{};
+    const auto at = [&](std::size_t offset) { return reinterpret_cast<std::uintptr_t>(&memory[offset]); };
+    BiwaCpu cpu = Cpu();
+    cpu.x[10] = at(64);
+    ASSERT_EQ(Step(cpu, 0xF9000541), StepResult::kOk);  // str x1, [x10, #8]
+    std::uint64_t stored = 0;
+    std::memcpy(&stored, &memory[72], 8);
+    EXPECT_EQ(stored, cpu.x[1]);
+    ASSERT_EQ(Step(cpu, 0xB9400940), StepResult::kOk);  // ldr w0, [x10, #8]
+    EXPECT_EQ(cpu.x[0], 0x9ABCDEF0u);
+    ASSERT_EQ(Step(cpu, 0x39802140), StepResult::kOk);  // ldrsb x0, [x10, #8]
+    EXPECT_EQ(cpu.x[0], 0xFFFFFFFFFFFFFFF0u);
+    ASSERT_EQ(Step(cpu, 0x79C01140), StepResult::kOk);  // ldrsh w0, [x10, #8]
+    EXPECT_EQ(cpu.x[0], 0xFFFFDEF0u);
+    ASSERT_EQ(Step(cpu, 0xA9BF0941), StepResult::kOk);  // stp x1, x2, [x10, #-16]!
+    EXPECT_EQ(cpu.x[10], at(48));
+    ASSERT_EQ(Step(cpu, 0xA8C11143), StepResult::kOk);  // ldp x3, x4, [x10], #16
+    EXPECT_EQ(cpu.x[3], cpu.x[1]);
+    EXPECT_EQ(cpu.x[4], cpu.x[2]);
+    EXPECT_EQ(cpu.x[10], at(64));
+    ASSERT_EQ(Step(cpu, 0x697E0D40), StepResult::kOk);  // ldpsw x0, x3, [x10, #-16]
+    EXPECT_EQ(cpu.x[0], 0xFFFFFFFF9ABCDEF0u);
+    EXPECT_EQ(cpu.x[3], 0x12345678u);
+    for (std::uint8_t i = 0; i < 16; ++i) {
+        cpu.v[5][i] = static_cast<std::uint8_t>(0xA0 + i);
+        cpu.v[6][i] = 0xFF;
+    }
+    cpu.x[11] = 2;
+    ASSERT_EQ(Step(cpu, 0x3CAB7945), StepResult::kOk);  // str q5, [x10, x11, lsl #4]
+    EXPECT_EQ(std::memcmp(&memory[96], cpu.v[5], 16), 0);
+    cpu.x[11] = 4;
+    ASSERT_EQ(Step(cpu, 0xFC6B7946), StepResult::kOk);  // ldr d6, [x10, x11, lsl #3]
+    EXPECT_EQ(std::memcmp(cpu.v[6], cpu.v[5], 8), 0);
+    EXPECT_EQ(cpu.v[6][8], 0);  // the rest of the register is cleared
+    EXPECT_EQ(cpu.v[6][15], 0);
+    ASSERT_EQ(Step(cpu, 0xB85FF140), StepResult::kOk);  // ldur w0, [x10, #-1] (unaligned)
+    EXPECT_EQ(cpu.x[0], 0x0Fu);                         // the top byte of x2, stored by the stp
+    ASSERT_EQ(Step(cpu, 0xF9800140), StepResult::kOk);  // prfm pldl1keep, [x10]
+    cpu.x[12] = 0xDEADBEEFFFFFFFFE;                     // w12 = -2
+    ASSERT_EQ(Step(cpu, 0xF86CD940), StepResult::kOk);  // ldr x0, [x10, w12, sxtw #3]
+    EXPECT_EQ(cpu.x[0], cpu.x[1]);
+    cpu.pc = at(128);
+    const std::uint64_t literal = 0x1122334455667788;
+    std::memcpy(&memory[144], &literal, 8);
+    ASSERT_EQ(Step(cpu, 0x58000080), StepResult::kOk);  // ldr x0, .+16
+    EXPECT_EQ(cpu.x[0], literal);
+    EXPECT_EQ(Step(cpu, 0xF8620820), StepResult::kUndefined);  // ldr x0, [x1, w2, uxtb]: reserved
 }
 
 TEST(A64InterpreterTest, RejectsWhatItCannotRun) {

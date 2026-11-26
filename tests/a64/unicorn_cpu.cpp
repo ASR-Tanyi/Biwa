@@ -32,11 +32,17 @@ int XRegister(std::size_t i) {
 
 }  // namespace
 
-UnicornCpu::UnicornCpu() {
+UnicornCpu::UnicornCpu(std::uint64_t data_address, std::uint64_t data_size)
+    : data_address_(data_address), data_size_(data_size) {
     Check(uc_open(UC_ARCH_ARM64, UC_MODE_ARM, &uc_), "uc_open");
-    Check(uc_ctl_set_cpu_model(uc_, UC_CPU_ARM64_A57), "set CPU model");
-    Check(uc_mem_map(uc_, kCodeAddress, kCodeSize, UC_PROT_READ | UC_PROT_EXEC), "map code");
-    Check(uc_mem_map(uc_, kDataAddress, kDataSize, UC_PROT_READ | UC_PROT_WRITE), "map data");
+    try {
+        Check(uc_ctl_set_cpu_model(uc_, UC_CPU_ARM64_A57), "set CPU model");
+        Check(uc_mem_map(uc_, kCodeAddress, kCodeSize, UC_PROT_READ | UC_PROT_EXEC), "map code");
+        Check(uc_mem_map(uc_, data_address, data_size, UC_PROT_ALL), "map data");
+    } catch (...) {
+        uc_close(uc_);
+        throw;
+    }
 }
 
 UnicornCpu::~UnicornCpu() {
@@ -46,11 +52,11 @@ UnicornCpu::~UnicornCpu() {
 }
 
 void UnicornCpu::WriteData(std::uint64_t offset, std::span<const std::uint8_t> bytes) {
-    Check(uc_mem_write(uc_, kDataAddress + offset, bytes.data(), bytes.size()), "write data");
+    Check(uc_mem_write(uc_, data_address_ + offset, bytes.data(), bytes.size()), "write data");
 }
 
 void UnicornCpu::ReadData(std::uint64_t offset, std::span<std::uint8_t> bytes) {
-    Check(uc_mem_read(uc_, kDataAddress + offset, bytes.data(), bytes.size()), "read data");
+    Check(uc_mem_read(uc_, data_address_ + offset, bytes.data(), bytes.size()), "read data");
 }
 
 void UnicornCpu::SetState(const CpuState& state) {
@@ -95,16 +101,19 @@ CpuState UnicornCpu::GetState() {
 }
 
 UnicornCpu::Outcome UnicornCpu::Run(const CpuState& state, std::span<const std::uint32_t> code) {
-    if (code.size() * 4 > kCodeSize) {
+    const std::uint64_t bytes_size = code.size() * 4;
+    const bool in_data = state.pc >= data_address_ && state.pc - data_address_ + bytes_size <= data_size_;
+    if (!in_data && bytes_size > kCodeSize) {
         throw std::runtime_error("too much code");
     }
-    std::vector<std::uint8_t> bytes(code.size() * 4);
+    const std::uint64_t start_pc = in_data ? state.pc : kCodeAddress;
+    std::vector<std::uint8_t> bytes(bytes_size);
     std::memcpy(bytes.data(), code.data(), bytes.size());
-    Check(uc_mem_write(uc_, kCodeAddress, bytes.data(), bytes.size()), "write code");
+    Check(uc_mem_write(uc_, start_pc, bytes.data(), bytes.size()), "write code");
     CpuState start = state;
-    start.pc = kCodeAddress;
+    start.pc = start_pc;
     SetState(start);
-    const uc_err err = uc_emu_start(uc_, kCodeAddress, kCodeAddress + bytes.size(), 0, 0);
+    const uc_err err = uc_emu_start(uc_, start_pc, start_pc + bytes.size(), 0, 0);
     Outcome outcome;
     outcome.state = GetState();
     outcome.completed = err == UC_ERR_OK;

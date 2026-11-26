@@ -143,7 +143,8 @@ C++ exceptions, `longjmp`, and fibers resume at a guest address with a guest `SP
 
 ## Memory accesses
 
-- Guest addresses are host addresses ([05](05-runtime-os.md)): no translation in generated code.
+- Guest addresses are host addresses ([05](05-runtime-os.md)): no translation in generated code. The semantics read and write with plain host accesses; unaligned ones are allowed, as for normal memory on the console.
+- CONSTRAINED UNPREDICTABLE forms that compilers do not emit (writeback with `Rt == Rn`, `LDP` with `Rt == Rt2`) behave as Unicorn does: the access first, then the writeback; for `LDP`, `Rt` is written last.
 - The module's `.text` stays mapped read-only at its guest address, for literal pools, jump tables and the interpreter.
 - An access to an unmapped or protected page raises a host access violation. The runtime's vectored exception handler turns it into a guest data abort report: guest PC (from the host-to-guest table), address, registers, guest backtrace.
 

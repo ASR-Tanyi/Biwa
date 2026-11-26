@@ -285,6 +285,187 @@ StepResult ThreeSource(BiwaCpu& cpu, Op op, std::uint32_t word) {
     return StepResult::kOk;
 }
 
+// ---- Loads and stores ----
+
+// The load/store register classes keep size in bits 31..30 and opc in bits 23..22.
+std::uint32_t LoadStoreSize(std::uint32_t word) { return word >> 30; }
+std::uint32_t LoadStoreOpc(std::uint32_t word) { return (word >> 22) & 3; }
+
+// A general-register access with `size` and `opc`: kUndefined for the combinations that are not
+// allocated; size 3 with opc 2 is a prefetch, which does nothing here.
+StepResult GeneralAccess(BiwaCpu& cpu, std::uint32_t size, std::uint32_t opc, std::uint32_t t, std::uint64_t address) {
+    if ((size == 3 && opc == 3) || (size == 2 && opc == 3)) {
+        return StepResult::kUndefined;
+    }
+    if (size == 3 && opc == 2) {
+        return StepResult::kOk;  // PRFM
+    }
+    sem_ldst(&cpu, size, opc, t, address);
+    return StepResult::kOk;
+}
+
+// The base register (SP for 31), then the access at base + offset (or at base when post-indexed),
+// then the writeback. With writeback and Rt == Rn the result is CONSTRAINED UNPREDICTABLE; doing
+// the access first and the writeback last matches Unicorn.
+template <typename Access>
+StepResult Indexed(BiwaCpu& cpu, std::uint32_t n, std::int64_t offset, bool writeback, bool postindex, Access access) {
+    const std::uint64_t base = sem_xsp(&cpu, n);
+    const std::uint64_t address = postindex ? base : base + static_cast<std::uint64_t>(offset);
+    const StepResult result = access(address);
+    if (result == StepResult::kOk && writeback) {
+        sem_set_xsp(&cpu, n, base + static_cast<std::uint64_t>(offset));
+    }
+    return result;
+}
+
+StepResult LoadLiteral(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    const Fields f{op, word};
+    const std::uint64_t address = cpu.pc + static_cast<std::uint64_t>(SignExtend(f('i'), 19) * 4);
+    const std::uint32_t opc = word >> 30;
+    const std::uint32_t t = f('t');
+    if (op == Op::LDR_lit_fpsimd) {
+        if (opc == 3) {
+            return StepResult::kUndefined;
+        }
+        sem_ldst_v(&cpu, opc + 2, true, t, address);
+        return StepResult::kOk;
+    }
+    switch (opc) {
+        case 0:
+            sem_ldst(&cpu, 2, 1, t, address);
+            break;
+        case 1:
+            sem_ldst(&cpu, 3, 1, t, address);
+            break;
+        case 2:
+            sem_ldst(&cpu, 2, 2, t, address);  // LDRSW
+            break;
+        default:
+            break;  // PRFM
+    }
+    return StepResult::kOk;
+}
+
+// STP, LDP, LDPSW, STNP, LDNP on general or SIMD&FP registers.
+StepResult LoadStorePair(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    const Fields f{op, word};
+    const bool vector = op == Op::STP_LDP_fpsimd || op == Op::STNP_LDNP_fpsimd;
+    const bool no_allocate = op == Op::STNP_LDNP_gen || op == Op::STNP_LDNP_fpsimd;
+    const std::uint32_t opc = word >> 30;
+    const bool load = ((word >> 22) & 1) != 0;
+    // Index mode in bits 24..23: 1 post-index, 2 signed offset, 3 pre-index (0 is no-allocate).
+    const std::uint32_t mode = (word >> 23) & 3;
+    if (opc == 3 || (!vector && opc == 1 && (!load || no_allocate))) {
+        return StepResult::kUndefined;  // STGP and the 64-bit LDPSW slots are not ARMv8.0
+    }
+    const std::uint32_t t = f('t');
+    const std::uint32_t t2 = f('u');
+    const std::uint32_t scale = vector ? opc + 2 : (opc == 2 ? 3 : 2);
+    const std::int64_t offset = SignExtend(f('i'), 7) * (std::int64_t{1} << scale);
+    const bool writeback = !no_allocate && mode != 2;
+    const bool postindex = !no_allocate && mode == 1;
+    return Indexed(cpu, f('n'), offset, writeback, postindex, [&](std::uint64_t address) {
+        if (vector) {
+            sem_ldst_pair_v(&cpu, scale, load, t, t2, address);
+        } else {
+            sem_ldst_pair(&cpu, scale, load, opc == 1, t, t2, address);
+        }
+        return StepResult::kOk;
+    });
+}
+
+// The SIMD&FP register size: opc bit 1 joined to size, 0 (B) to 4 (Q).
+std::uint32_t VectorScale(std::uint32_t word) { return (((word >> 23) & 1) << 2) | (word >> 30); }
+
+// STR / LDR (and STUR / LDUR, unprivileged) on one register with an immediate: `scaled` for the
+// unsigned 12-bit offset, otherwise a signed 9-bit one, pre- or post-indexed when `writeback`.
+StepResult LoadStoreImmediate(BiwaCpu& cpu, Op op, std::uint32_t word, bool vector, bool scaled, bool writeback) {
+    const Fields f{op, word};
+    const std::uint32_t size = vector ? VectorScale(word) : LoadStoreSize(word);
+    if (vector && size > 4) {
+        return StepResult::kUndefined;
+    }
+    const std::int64_t offset =
+        scaled ? static_cast<std::int64_t>(std::uint64_t{f('i')} << size) : SignExtend(f('i'), 9);
+    const bool postindex = writeback && ((word >> 11) & 1) == 0;
+    const std::uint32_t t = f('t');
+    return Indexed(cpu, f('n'), offset, writeback, postindex, [&](std::uint64_t address) {
+        if (vector) {
+            sem_ldst_v(&cpu, size, ((word >> 22) & 1) != 0, t, address);
+            return StepResult::kOk;
+        }
+        return GeneralAccess(cpu, size, LoadStoreOpc(word), t, address);
+    });
+}
+
+// STR / LDR (register offset): Rm extended by option (UXTW, LSL, SXTW, SXTX) and scaled when S is set.
+StepResult LoadStoreRegisterOffset(BiwaCpu& cpu, Op op, std::uint32_t word, bool vector) {
+    const Fields f{op, word};
+    const std::uint32_t size = vector ? VectorScale(word) : LoadStoreSize(word);
+    const std::uint32_t option = f('x');
+    if ((option & 2) == 0 || (vector && size > 4)) {
+        return StepResult::kUndefined;
+    }
+    const std::uint64_t index = sem_extend(sem_x(&cpu, f('m')), option, f('S') != 0 ? size : 0);
+    const std::uint64_t address = sem_xsp(&cpu, f('n')) + index;
+    if (vector) {
+        sem_ldst_v(&cpu, size, ((word >> 22) & 1) != 0, f('t'), address);
+        return StepResult::kOk;
+    }
+    return GeneralAccess(cpu, size, LoadStoreOpc(word), f('t'), address);
+}
+
+StepResult LoadStore(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    switch (op) {
+        case Op::LDR_lit_gen:
+        case Op::LDRSW_lit:
+        case Op::PRFM_lit:
+        case Op::LDR_lit_fpsimd:
+            return LoadLiteral(cpu, op, word);
+        case Op::STNP_LDNP_gen:
+        case Op::STNP_LDNP_fpsimd:
+        case Op::STP_LDP_gen:
+        case Op::STP_LDP_fpsimd:
+            return LoadStorePair(cpu, op, word);
+        case Op::PRFM_imm:
+        case Op::PRFM_unscaled_imm:
+            return StepResult::kOk;
+        case Op::STURx_LDURx:
+        case Op::STTRB:
+        case Op::LDTRB:
+        case Op::LDTRSB:
+        case Op::STTRH:
+        case Op::LDTRH:
+        case Op::LDTRSH:
+        case Op::STTR:
+        case Op::LDTR:
+        case Op::LDTRSW:
+            // Unprivileged accesses are ordinary ones at EL0.
+            return LoadStoreImmediate(cpu, op, word, false, false, false);
+        case Op::STUR_fpsimd:
+        case Op::LDUR_fpsimd:
+            return LoadStoreImmediate(cpu, op, word, true, false, false);
+        case Op::STRx_LDRx_imm_1:
+            return LoadStoreImmediate(cpu, op, word, false, false, true);
+        case Op::STRx_LDRx_imm_2:
+            return LoadStoreImmediate(cpu, op, word, false, true, false);
+        case Op::STR_imm_fpsimd_1:
+        case Op::LDR_imm_fpsimd_1:
+            return LoadStoreImmediate(cpu, op, word, true, false, true);
+        case Op::STR_imm_fpsimd_2:
+        case Op::LDR_imm_fpsimd_2:
+            return LoadStoreImmediate(cpu, op, word, true, true, false);
+        case Op::STRx_reg:
+        case Op::LDRx_reg:
+            return LoadStoreRegisterOffset(cpu, op, word, false);
+        case Op::STR_reg_fpsimd:
+        case Op::LDR_reg_fpsimd:
+            return LoadStoreRegisterOffset(cpu, op, word, true);
+        default:
+            return StepResult::kNotImplemented;
+    }
+}
+
 StepResult Execute(BiwaCpu& cpu, Op op, std::uint32_t word) {
     switch (op) {
         case Op::ADR:
@@ -387,7 +568,7 @@ StepResult Execute(BiwaCpu& cpu, Op op, std::uint32_t word) {
         case Op::UMULH:
             return ThreeSource(cpu, op, word);
         default:
-            return StepResult::kNotImplemented;
+            return LoadStore(cpu, op, word);
     }
 }
 

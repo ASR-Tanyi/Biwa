@@ -514,6 +514,96 @@ static inline void sem_mulh(BiwaCpu* cpu, bool is_signed, unsigned d, unsigned n
     sem_set_x(cpu, d, result);
 }
 
+/* ---- Loads and stores ---- */
+
+/* Guest addresses are host addresses (docs/design/05-runtime-os.md, "Guest address space"), so an
+   access is a plain host access. Unaligned accesses are allowed, as for normal memory on the
+   console. Addresses come from the caller: base register, offset and writeback are the
+   addressing mode's business. */
+
+/* The only places that turn a guest address into a host pointer. */
+static inline void sem_copy_in(void* host, uint64_t address, unsigned bytes) {
+    /* NOLINTNEXTLINE(performance-no-int-to-ptr,clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
+    __builtin_memcpy(host, (const void*)(uintptr_t)address, bytes);
+}
+
+static inline void sem_copy_out(uint64_t address, const void* host, unsigned bytes) {
+    /* NOLINTNEXTLINE(performance-no-int-to-ptr,clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
+    __builtin_memcpy((void*)(uintptr_t)address, host, bytes);
+}
+
+static inline uint64_t sem_read(uint64_t address, unsigned bytes) {
+    uint64_t value = 0;
+    sem_copy_in(&value, address, bytes);
+    return value;
+}
+
+static inline void sem_write(uint64_t address, unsigned bytes, uint64_t value) { sem_copy_out(address, &value, bytes); }
+
+static inline uint64_t sem_sign_extend(uint64_t value, unsigned bits) {
+    const uint64_t sign = (uint64_t)1 << (bits - 1);
+    return ((value & ((sign << 1) - 1)) ^ sign) - sign;
+}
+
+/* STR, LDR and their byte, halfword and signed forms on Xt / Wt (any addressing mode). `size` is
+   log2 of the access in bytes; `opc` as encoded: 0 store, 1 load, 2 load sign-extended to 64 bits,
+   3 load sign-extended to 32 bits. */
+static inline void sem_ldst(BiwaCpu* cpu, unsigned size, unsigned opc, unsigned t, uint64_t address) {
+    const unsigned bytes = 1u << size;
+    if (opc == 0) {
+        sem_write(address, bytes, sem_x(cpu, t));
+        return;
+    }
+    uint64_t value = sem_read(address, bytes);
+    if (opc >= 2 && size < 3) {
+        value = sem_sign_extend(value, 8 * bytes);
+        if (opc == 3) {
+            value = (uint32_t)value;
+        }
+    }
+    sem_set_x(cpu, t, value);
+}
+
+/* STR and LDR (SIMD&FP) of Bt, Ht, St, Dt or Qt (`scale` 0..4); loads clear the rest of the
+   register. */
+static inline void sem_ldst_v(BiwaCpu* cpu, unsigned scale, bool load, unsigned t, uint64_t address) {
+    const unsigned bytes = 1u << scale;
+    if (load) {
+        for (unsigned i = bytes; i < 16; ++i) {
+            cpu->v[t][i] = 0;
+        }
+        sem_copy_in(cpu->v[t], address, bytes);
+    } else {
+        sem_copy_out(address, cpu->v[t], bytes);
+    }
+}
+
+/* STP, LDP, STNP, LDNP (`size` 2 for W, 3 for X) and LDPSW (`sign`). */
+static inline void sem_ldst_pair(BiwaCpu* cpu, unsigned size, bool load, bool sign, unsigned t, unsigned t2,
+                                 uint64_t address) {
+    const unsigned bytes = 1u << size;
+    if (!load) {
+        sem_write(address, bytes, sem_x(cpu, t));
+        sem_write(address + bytes, bytes, sem_x(cpu, t2));
+        return;
+    }
+    uint64_t first = sem_read(address, bytes);
+    uint64_t second = sem_read(address + bytes, bytes);
+    if (sign) {
+        first = sem_sign_extend(first, 32);
+        second = sem_sign_extend(second, 32);
+    }
+    /* Rt is written last: LDP with Rt == Rt2 is CONSTRAINED UNPREDICTABLE, and this matches Unicorn. */
+    sem_set_x(cpu, t2, second);
+    sem_set_x(cpu, t, first);
+}
+
+/* STP, LDP, STNP, LDNP (SIMD&FP) of St, Dt or Qt (`scale` 2..4). */
+static inline void sem_ldst_pair_v(BiwaCpu* cpu, unsigned scale, bool load, unsigned t, unsigned t2, uint64_t address) {
+    sem_ldst_v(cpu, scale, load, t, address);
+    sem_ldst_v(cpu, scale, load, t2, address + (1u << scale));
+}
+
 #ifdef __cplusplus
 }
 #pragma clang diagnostic pop
