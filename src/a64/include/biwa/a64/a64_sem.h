@@ -1916,10 +1916,13 @@ static inline void sem_vrev(BiwaCpu* cpu, bool q, unsigned esize, unsigned conta
 
 #define SEM_FPSR_QC (1u << 27)
 
-static inline uint64_t sem_lane_mask(unsigned bits) { return bits == 64 ? ~(uint64_t)0 : ((uint64_t)1 << bits) - 1; }
+static inline uint64_t sem_lane_mask(unsigned bits) { return bits >= 64 ? ~(uint64_t)0 : ((uint64_t)1 << bits) - 1; }
 
 /* A lane's value as a wide integer: zero-extended (`is_unsigned`) or sign-extended. */
 static inline __int128 sem_lane_value(uint64_t x, unsigned bits, bool is_unsigned) {
+    if (bits >= 64) {
+        return is_unsigned ? (__int128)x : (__int128)(int64_t)x;
+    }
     return is_unsigned ? (__int128)(x & sem_lane_mask(bits)) : (__int128)(int64_t)sem_sign_extend(x, bits);
 }
 
@@ -2026,10 +2029,8 @@ static inline uint64_t sem_int3_lane(BiwaCpu* cpu, bool u, unsigned opcode, unsi
 
 /* The integer three-same forms, vector or scalar (one lane, the rest of Vd cleared). The pairwise
    ones (SMAXP, SMINP, UMAXP, UMINP, ADDP: opcodes 0x14, 0x15, 0x17) take adjacent lanes of Vm:Vn. */
-static inline void sem_simd_int3(BiwaCpu* cpu, bool u, unsigned opcode, bool q, bool scalar, unsigned esize, unsigned d,
-                                 unsigned n, unsigned m) {
-    const SemVec a = sem_vread(cpu, n);
-    const SemVec b = sem_vread(cpu, m);
+static inline void sem_simd_int3_v(BiwaCpu* cpu, bool u, unsigned opcode, bool q, bool scalar, unsigned esize,
+                                   unsigned d, SemVec a, SemVec b) {
     const SemVec acc = sem_vread(cpu, d);
     const unsigned bits = 8 * esize;
     const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / esize;
@@ -2054,6 +2055,11 @@ static inline void sem_simd_int3(BiwaCpu* cpu, bool u, unsigned opcode, bool q, 
         sem_set_lane(&r, i, esize, out);
     }
     sem_vwrite(cpu, d, &r, q && !scalar);
+}
+
+static inline void sem_simd_int3(BiwaCpu* cpu, bool u, unsigned opcode, bool q, bool scalar, unsigned esize, unsigned d,
+                                 unsigned n, unsigned m) {
+    sem_simd_int3_v(cpu, u, opcode, q, scalar, esize, d, sem_vread(cpu, n), sem_vread(cpu, m));
 }
 
 /* The integer two-register forms on lanes of one size, vector or scalar; `opcode` is bits 16..12:
@@ -2192,6 +2198,218 @@ static inline void sem_simd_across(BiwaCpu* cpu, unsigned op, bool q, unsigned e
     SemVec r = {{0}};
     sem_set_lane(&r, 0, out, (uint64_t)acc & sem_lane_mask(8 * out));
     sem_vwrite(cpu, d, &r, false);
+}
+
+/* ---- Advanced SIMD: long, wide, narrowing, by-element and shift-by-immediate integer forms ---- */
+
+/* Lane `index` of Vm in every lane (the by-element forms). */
+static inline SemVec sem_broadcast(const BiwaCpu* cpu, unsigned m, unsigned index, unsigned esize) {
+    const SemVec v = sem_vread(cpu, m);
+    const uint64_t x = sem_lane(&v, index, esize);
+    SemVec r = {{0}};
+    for (unsigned i = 0; i < 16 / esize; ++i) {
+        sem_set_lane(&r, i, esize, x);
+    }
+    return r;
+}
+
+/* PMULL, PMULL2: carry-less products of bytes into halfwords, or (esize 8, the crypto extension) of
+   one doubleword pair into 128 bits. */
+static inline void sem_pmull(BiwaCpu* cpu, bool q, unsigned esize, unsigned d, SemVec a, SemVec b) {
+    SemVec r = {{0}};
+    const unsigned first = q ? 8 / esize : 0;
+    if (esize == 8) {
+        const uint64_t x = sem_lane(&a, first, 8);
+        const uint64_t y = sem_lane(&b, first, 8);
+        uint64_t lo = 0;
+        uint64_t hi = 0;
+        for (unsigned k = 0; k < 64; ++k) {
+            if (((y >> k) & 1) != 0) {
+                lo ^= x << k;
+                hi ^= k == 0 ? 0 : x >> (64 - k);
+            }
+        }
+        sem_set_lane(&r, 0, 8, lo);
+        sem_set_lane(&r, 1, 8, hi);
+    } else {
+        for (unsigned i = 0; i < 8; ++i) {
+            const uint64_t x = sem_lane(&a, first + i, 1);
+            const uint64_t y = sem_lane(&b, first + i, 1);
+            uint64_t p = 0;
+            for (unsigned k = 0; k < 8; ++k) {
+                if (((y >> k) & 1) != 0) {
+                    p ^= x << k;
+                }
+            }
+            sem_set_lane(&r, i, 2, p);
+        }
+    }
+    sem_vwrite(cpu, d, &r, true);
+}
+
+/* The three-different forms (opcode: bits 15..12) and the long by-element ones, vector or scalar:
+   SADDL / UADDL (0), SADDW / UADDW (1), SSUBL / USUBL (2), SSUBW / USUBW (3), ADDHN / RADDHN (4),
+   SABAL / UABAL (5), SUBHN / RSUBHN (6), SABDL / UABDL (7), SMLAL / UMLAL (8), SQDMLAL (9),
+   SMLSL / UMLSL (10), SQDMLSL (11), SMULL / UMULL (12), SQDMULL (13). Lanes of esize widen to
+   2 * esize (the W forms take wide lanes from Vn); the "2" forms (q) read the upper halves; the
+   HN forms narrow the high halves of wide sums into the low or (q) upper half of Vd. */
+static inline void sem_simd_long(BiwaCpu* cpu, bool u, unsigned opcode, bool q, bool scalar, unsigned esize, unsigned d,
+                                 SemVec a, SemVec b) {
+    const SemVec acc = sem_vread(cpu, d);
+    const unsigned bits = 8 * esize;
+    const unsigned wide = 2 * esize;
+    SemVec r = {{0}};
+    if (opcode == 4 || opcode == 6) {
+        if (q) {
+            r = acc;
+        }
+        for (unsigned i = 0; i < 8 / esize; ++i) {
+            const uint64_t x = sem_lane(&a, i, wide);
+            const uint64_t y = sem_lane(&b, i, wide);
+            uint64_t sum = opcode == 4 ? x + y : x - y;
+            if (u) {
+                sum += (uint64_t)1 << (bits - 1);
+            }
+            sem_set_lane(&r, (q ? 8 / esize : 0) + i, esize, (sum >> bits) & sem_lane_mask(bits));
+        }
+        sem_vwrite(cpu, d, &r, true);
+        return;
+    }
+    const unsigned first = q && !scalar ? 8 / esize : 0;
+    const unsigned lanes = scalar ? 1 : 8 / esize;
+    for (unsigned i = 0; i < lanes; ++i) {
+        const __int128 x = opcode == 1 || opcode == 3 ? sem_lane_value(sem_lane(&a, i, wide), 2 * bits, u)
+                                                      : sem_lane_value(sem_lane(&a, first + i, esize), bits, u);
+        const __int128 y = sem_lane_value(sem_lane(&b, first + i, esize), bits, u);
+        const uint64_t old = sem_lane(&acc, i, wide);
+        __int128 out = 0;
+        switch (opcode) {
+            case 0:
+            case 1:
+                out = x + y;
+                break;
+            case 2:
+            case 3:
+                out = x - y;
+                break;
+            case 5:
+                out = (__int128)old + (x > y ? x - y : y - x);
+                break;
+            case 7:
+                out = x > y ? x - y : y - x;
+                break;
+            case 8:
+                out = (__int128)old + x * y;
+                break;
+            case 10:
+                out = (__int128)old - x * y;
+                break;
+            case 12:
+                out = x * y;
+                break;
+            default: { /* SQDMLAL, SQDMLSL, SQDMULL: the doubled product saturated, then the sum */
+                const uint64_t product = sem_saturate(cpu, 2 * x * y, 2 * bits, false);
+                if (opcode == 13) {
+                    out = (__int128)product;
+                    break;
+                }
+                const __int128 p = sem_lane_value(product, 2 * bits, false);
+                const __int128 o = sem_lane_value(old, 2 * bits, false);
+                out = (__int128)sem_saturate(cpu, opcode == 9 ? o + p : o - p, 2 * bits, false);
+                break;
+            }
+        }
+        sem_set_lane(&r, i, wide, (uint64_t)out & sem_lane_mask(2 * bits));
+    }
+    sem_vwrite(cpu, d, &r, !scalar);
+}
+
+/* The shift-by-immediate forms (opcode: bits 15..11), vector or scalar, lanes of esize:
+   SSHR / USHR (0x00), SSRA / USRA (0x02), SRSHR / URSHR (0x04), SRSRA / URSRA (0x06), SRI (0x08),
+   SHL / SLI (0x0A), SQSHLU (0x0C), SQSHL / UQSHL (0x0E) by `shift` (right shifts 1..bits, left
+   0..bits - 1). */
+static inline void sem_simd_shift_imm(BiwaCpu* cpu, bool u, unsigned opcode, bool q, bool scalar, unsigned esize,
+                                      unsigned shift, unsigned d, unsigned n) {
+    const SemVec a = sem_vread(cpu, n);
+    const SemVec acc = sem_vread(cpu, d);
+    const unsigned bits = 8 * esize;
+    const uint64_t mask = sem_lane_mask(bits);
+    const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / esize;
+    SemVec r = {{0}};
+    for (unsigned i = 0; i < lanes; ++i) {
+        const uint64_t raw = sem_lane(&a, i, esize);
+        const uint64_t old = sem_lane(&acc, i, esize);
+        const __int128 x = sem_lane_value(raw, bits, u);
+        uint64_t out = 0;
+        switch (opcode) {
+            case 0x00:
+            case 0x02:
+            case 0x04:
+            case 0x06: {
+                const bool rounding = opcode == 0x04 || opcode == 0x06;
+                const __int128 shifted = (x + (rounding ? (__int128)1 << (shift - 1) : 0)) >> shift;
+                out = ((uint64_t)shifted + (opcode == 0x02 || opcode == 0x06 ? old : 0)) & mask;
+                break;
+            }
+            case 0x08: { /* SRI: Vd keeps its top `shift` bits */
+                const uint64_t keep = shift >= bits ? mask : ~(mask >> shift) & mask;
+                out = (old & keep) | (shift >= bits ? 0 : raw >> shift);
+                break;
+            }
+            case 0x0A: /* SHL; SLI keeps Vd's low `shift` bits */
+                out = ((raw << shift) & mask) | (u ? old & (((uint64_t)1 << shift) - 1) : 0);
+                break;
+            case 0x0C: /* SQSHLU: signed in, unsigned saturation */
+                out = sem_saturate(cpu, sem_lane_value(raw, bits, false) * ((__int128)1 << shift), bits, true);
+                break;
+            default:
+                out = sem_saturate(cpu, x * ((__int128)1 << shift), bits, u);
+                break;
+        }
+        sem_set_lane(&r, i, esize, out);
+    }
+    sem_vwrite(cpu, d, &r, q && !scalar);
+}
+
+/* The narrowing shifts (opcode: bits 15..11): SHRN / SQSHRUN (0x10), RSHRN / SQRSHRUN (0x11),
+   SQSHRN / UQSHRN (0x12), SQRSHRN / UQRSHRN (0x13): lanes of 2 * esize shifted right by `shift`
+   (1..8 * esize) into esize, in the low half of Vd or (q, the "2" forms) its upper half; scalar:
+   one lane. */
+static inline void sem_simd_shift_narrow(BiwaCpu* cpu, bool u, unsigned opcode, bool q, bool scalar, unsigned esize,
+                                         unsigned shift, unsigned d, unsigned n) {
+    const SemVec a = sem_vread(cpu, n);
+    const unsigned bits = 8 * esize;
+    const bool rounding = (opcode & 1) != 0;
+    /* SHRN / RSHRN truncate; SQSHRUN / SQRSHRUN read signed and saturate unsigned; the others read
+       and saturate as signed (S) or unsigned (U). */
+    const bool plain = opcode <= 0x11 && !u;
+    const bool source_unsigned = opcode >= 0x12 && u;
+    SemVec r = {{0}};
+    if (q && !scalar) {
+        r = sem_vread(cpu, d);
+    }
+    const unsigned lanes = scalar ? 1 : 8 / esize;
+    const unsigned first = q && !scalar ? lanes : 0;
+    for (unsigned i = 0; i < lanes; ++i) {
+        const __int128 x = sem_lane_value(sem_lane(&a, i, 2 * esize), 2 * bits, source_unsigned || plain);
+        const __int128 shifted = (x + (rounding ? (__int128)1 << (shift - 1) : 0)) >> shift;
+        const uint64_t out = plain ? (uint64_t)shifted & sem_lane_mask(bits) : sem_saturate(cpu, shifted, bits, u);
+        sem_set_lane(&r, first + i, esize, out);
+    }
+    sem_vwrite(cpu, d, &r, true);
+}
+
+/* SSHLL, USHLL (and "2"): lanes of the low or upper half widened and shifted left by `shift`. */
+static inline void sem_simd_shll_imm(BiwaCpu* cpu, bool u, bool q, unsigned esize, unsigned shift, unsigned d,
+                                     unsigned n) {
+    const SemVec a = sem_vread(cpu, n);
+    SemVec r = {{0}};
+    const unsigned lanes = 8 / esize;
+    for (unsigned i = 0; i < lanes; ++i) {
+        const __int128 x = sem_lane_value(sem_lane(&a, (q ? lanes : 0) + i, esize), 8 * esize, u);
+        sem_set_lane(&r, i, 2 * esize, (uint64_t)(x * ((__int128)1 << shift)));
+    }
+    sem_vwrite(cpu, d, &r, true);
 }
 
 #ifdef __cplusplus

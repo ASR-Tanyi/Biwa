@@ -743,4 +743,23 @@ INSTANTIATE_TEST_SUITE_P(
                     Op::SMAXV, Op::UMAXV, Op::SMINV, Op::UMINV, Op::SADDLV, Op::UADDLV, Op::ADDP_pair),
     Name);
 
+// Advanced SIMD: shifts by immediate, long / wide / narrowing and by-element integer forms.
+INSTANTIATE_TEST_SUITE_P(
+    SimdIntegerLong, SemanticsTest,
+    testing::Values(Op::SSHR_2, Op::SSRA_2, Op::SRSHR_2, Op::SRSRA_2, Op::SHL_2, Op::SQSHL_imm_2, Op::SHRN, Op::RSHRN,
+                    Op::SQSHRN_2, Op::SQRSHRN_2, Op::SSHLL, Op::USHR_2, Op::USRA_2, Op::URSHR_2, Op::URSRA_2, Op::SRI_2,
+                    Op::SLI_2, Op::SQSHLU_2, Op::UQSHL_imm_2, Op::SQSHRUN_2, Op::SQRSHRUN_2, Op::UQSHRN_2,
+                    Op::UQRSHRN_2, Op::USHLL, Op::SSHR_1, Op::SSRA_1, Op::SRSHR_1, Op::SRSRA_1, Op::SHL_1,
+                    Op::SQSHL_imm_1, Op::SQSHRN_1, Op::SQRSHRN_1, Op::USHR_1, Op::USRA_1, Op::URSHR_1, Op::URSRA_1,
+                    Op::SRI_1, Op::SLI_1, Op::SQSHLU_1, Op::UQSHL_imm_1, Op::SQSHRUN_1, Op::SQRSHRUN_1, Op::UQSHRN_1,
+                    Op::UQRSHRN_1, Op::SADDL, Op::SADDW, Op::SSUBL, Op::SSUBW, Op::ADDHN, Op::SABAL, Op::SUBHN,
+                    Op::SABDL, Op::SMLAL_vec, Op::SMLSL_vec, Op::SMULL_vec, Op::PMULL, Op::UADDL, Op::UADDW, Op::USUBL,
+                    Op::USUBW, Op::RADDHN, Op::UABAL, Op::RSUBHN, Op::UABDL, Op::UMLAL_vec, Op::UMLSL_vec,
+                    Op::UMULL_vec, Op::SQDMULL_vec_2, Op::SQDMLAL_vec_2, Op::SQDMLSL_vec_2, Op::SQDMULL_vec_1,
+                    Op::SQDMLAL_vec_1, Op::SQDMLSL_vec_1, Op::SMLAL_elt, Op::SMLSL_elt, Op::MUL_elt, Op::SMULL_elt,
+                    Op::SQDMULL_elt_2, Op::SQDMULH_elt_2, Op::SQRDMULH_elt_2, Op::MLA_elt, Op::UMLAL_elt, Op::MLS_elt,
+                    Op::UMLSL_elt, Op::UMULL_elt, Op::SQDMLAL_elt_2, Op::SQDMLSL_elt_2, Op::SQDMLAL_elt_1,
+                    Op::SQDMLSL_elt_1, Op::SQDMULL_elt_1, Op::SQDMULH_elt_1, Op::SQRDMULH_elt_1),
+    Name);
+
 }  // namespace

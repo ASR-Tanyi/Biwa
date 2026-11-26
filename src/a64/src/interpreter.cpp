@@ -1329,6 +1329,144 @@ StepResult SimdAcross(BiwaCpu& cpu, Op op, std::uint32_t word) {
     return StepResult::kOk;
 }
 
+// Shifts by immediate, vector and scalar: the lane size from the highest set bit of immh
+// (bits 22..19; none is reserved), the shift from immh:immb (bits 22..16), the opcode bits 15..11.
+StepResult SimdShiftImmediate(BiwaCpu& cpu, std::uint32_t word, bool scalar) {
+    const bool q = !scalar && ((word >> 30) & 1) != 0;
+    const bool u = ((word >> 29) & 1) != 0;
+    const std::uint32_t immh = (word >> 19) & 15;
+    const std::uint32_t immhb = (word >> 16) & 127;
+    const std::uint32_t opcode = (word >> 11) & 31;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t d = word & 31;
+    if (immh == 0) {
+        return StepResult::kUndefined;
+    }
+    const unsigned size = 31u - static_cast<unsigned>(__builtin_clz(immh));
+    const unsigned esize = 1u << size;
+    const unsigned bits = 8 * esize;
+    const unsigned right = 2 * bits - immhb;  // right shifts: 1..bits
+    const unsigned left = immhb - bits;       // left shifts: 0..bits - 1
+    switch (opcode) {
+        case 0x10:  // SHRN / SQSHRUN
+        case 0x11:  // RSHRN / SQRSHRUN
+        case 0x12:  // SQSHRN / UQSHRN
+        case 0x13:  // SQRSHRN / UQRSHRN
+            if (size == 3 || (scalar && opcode <= 0x11 && !u)) {
+                return StepResult::kUndefined;
+            }
+            sem_simd_shift_narrow(&cpu, u, opcode, q, scalar, esize, right, d, n);
+            return StepResult::kOk;
+        case 0x14:  // SSHLL, USHLL
+            if (size == 3 || scalar) {
+                return StepResult::kUndefined;
+            }
+            sem_simd_shll_imm(&cpu, u, q, esize, left, d, n);
+            return StepResult::kOk;
+        case 0x1C:  // SCVTF, UCVTF (fixed-point)
+        case 0x1F:  // FCVTZS, FCVTZU (fixed-point)
+            return StepResult::kNotImplemented;
+        default:
+            break;
+    }
+    // Same-size shifts: as scalars, only SQSHL / UQSHL / SQSHLU take sizes below 64 bits.
+    const bool saturating_left = opcode == 0x0C || opcode == 0x0E;
+    if (scalar ? !saturating_left && size != 3 : size == 3 && !q) {
+        return StepResult::kUndefined;
+    }
+    if (opcode == 0x0C && !u) {
+        return StepResult::kUndefined;
+    }
+    const bool left_shift = opcode == 0x0A || saturating_left;
+    sem_simd_shift_imm(&cpu, u, opcode, q, scalar, esize, left_shift ? left : right, d, n);
+    return StepResult::kOk;
+}
+
+// The element index and Vm of the by-element forms: halfwords take H:L:M and a 4-bit Rm, words
+// H:L and M:Rm; other sizes are reserved for the integer forms.
+struct ByElement {
+    unsigned index;
+    unsigned m;
+};
+
+std::optional<ByElement> DecodeByElement(std::uint32_t word) {
+    const std::uint32_t size = (word >> 22) & 3;
+    const std::uint32_t h = (word >> 11) & 1;
+    const std::uint32_t l = (word >> 21) & 1;
+    const std::uint32_t m_bit = (word >> 20) & 1;
+    const std::uint32_t rm = (word >> 16) & 15;
+    switch (size) {
+        case 1:
+            return ByElement{(h << 2) | (l << 1) | m_bit, rm};
+        case 2:
+            return ByElement{(h << 1) | l, (m_bit << 4) | rm};
+        default:
+            return std::nullopt;
+    }
+}
+
+// Three-different (long, wide, narrowing) and the integer by-element forms.
+StepResult SimdLong(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    const bool scalar = op == Op::SQDMLAL_vec_1 || op == Op::SQDMLSL_vec_1 || op == Op::SQDMULL_vec_1 ||
+                        op == Op::SQDMLAL_elt_1 || op == Op::SQDMLSL_elt_1 || op == Op::SQDMULL_elt_1 ||
+                        op == Op::SQDMULH_elt_1 || op == Op::SQRDMULH_elt_1;
+    const bool q = !scalar && ((word >> 30) & 1) != 0;
+    const bool u = ((word >> 29) & 1) != 0;
+    const std::uint32_t size = (word >> 22) & 3;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t d = word & 31;
+    const unsigned esize = 1u << size;
+    const bool by_element = ((word >> 24) & 1) != 0;
+    if (by_element) {
+        const std::optional<ByElement> element = DecodeByElement(word);
+        if (!element) {
+            return StepResult::kUndefined;
+        }
+        const SemVec a = sem_vread(&cpu, n);
+        const SemVec b = sem_broadcast(&cpu, element->m, element->index, esize);
+        const std::uint32_t opcode = (word >> 12) & 15;
+        switch (opcode) {
+            case 0x0:  // MLA (U = 1)
+            case 0x4:  // MLS (U = 1)
+                sem_simd_int3_v(&cpu, opcode == 0x4, 0x12, q, false, esize, d, a, b);
+                return StepResult::kOk;
+            case 0x8:  // MUL
+                sem_simd_int3_v(&cpu, false, 0x13, q, false, esize, d, a, b);
+                return StepResult::kOk;
+            case 0xC:  // SQDMULH
+            case 0xD:  // SQRDMULH
+                sem_simd_int3_v(&cpu, opcode == 0xD, 0x16, q, scalar, esize, d, a, b);
+                return StepResult::kOk;
+            default:  // SMLAL / UMLAL (2), SQDMLAL (3), SMLSL / UMLSL (6), SQDMLSL (7), SMULL / UMULL (A), SQDMULL (B)
+                sem_simd_long(&cpu, u,
+                              opcode == 0x2   ? 8
+                              : opcode == 0x3 ? 9
+                              : opcode == 0x6 ? 10
+                              : opcode == 0x7 ? 11
+                              : opcode == 0xA ? 12
+                                              : 13,
+                              q, scalar, esize, d, a, b);
+                return StepResult::kOk;
+        }
+    }
+    const std::uint32_t opcode = (word >> 12) & 15;
+    const SemVec a = sem_vread(&cpu, n);
+    const SemVec b = sem_vread(&cpu, (word >> 16) & 31);
+    if (opcode == 0xE) {  // PMULL: bytes, or doublewords with the crypto extension
+        if (size == 1 || size == 2) {
+            return StepResult::kUndefined;
+        }
+        sem_pmull(&cpu, q, esize, d, a, b);
+        return StepResult::kOk;
+    }
+    const bool doubling = opcode == 0x9 || opcode == 0xB || opcode == 0xD;
+    if (size == 3 || (doubling && size == 0)) {
+        return StepResult::kUndefined;
+    }
+    sem_simd_long(&cpu, u, opcode, q, scalar, esize, d, a, b);
+    return StepResult::kOk;
+}
+
 StepResult Simd(BiwaCpu& cpu, Op op, std::uint32_t word) {
     switch (op) {
         case Op::DUP_elt_1:
@@ -1482,6 +1620,101 @@ StepResult Simd(BiwaCpu& cpu, Op op, std::uint32_t word) {
         case Op::UADDLV:
         case Op::ADDP_pair:
             return SimdAcross(cpu, op, word);
+        case Op::SSHR_2:
+        case Op::SSRA_2:
+        case Op::SRSHR_2:
+        case Op::SRSRA_2:
+        case Op::SHL_2:
+        case Op::SQSHL_imm_2:
+        case Op::SHRN:
+        case Op::RSHRN:
+        case Op::SQSHRN_2:
+        case Op::SQRSHRN_2:
+        case Op::SSHLL:
+        case Op::USHR_2:
+        case Op::USRA_2:
+        case Op::URSHR_2:
+        case Op::URSRA_2:
+        case Op::SRI_2:
+        case Op::SLI_2:
+        case Op::SQSHLU_2:
+        case Op::UQSHL_imm_2:
+        case Op::SQSHRUN_2:
+        case Op::SQRSHRUN_2:
+        case Op::UQSHRN_2:
+        case Op::UQRSHRN_2:
+        case Op::USHLL:
+            return SimdShiftImmediate(cpu, word, false);
+        case Op::SSHR_1:
+        case Op::SSRA_1:
+        case Op::SRSHR_1:
+        case Op::SRSRA_1:
+        case Op::SHL_1:
+        case Op::SQSHL_imm_1:
+        case Op::SQSHRN_1:
+        case Op::SQRSHRN_1:
+        case Op::USHR_1:
+        case Op::USRA_1:
+        case Op::URSHR_1:
+        case Op::URSRA_1:
+        case Op::SRI_1:
+        case Op::SLI_1:
+        case Op::SQSHLU_1:
+        case Op::UQSHL_imm_1:
+        case Op::SQSHRUN_1:
+        case Op::SQRSHRUN_1:
+        case Op::UQSHRN_1:
+        case Op::UQRSHRN_1:
+            return SimdShiftImmediate(cpu, word, true);
+        case Op::SADDL:
+        case Op::SADDW:
+        case Op::SSUBL:
+        case Op::SSUBW:
+        case Op::ADDHN:
+        case Op::SABAL:
+        case Op::SUBHN:
+        case Op::SABDL:
+        case Op::SMLAL_vec:
+        case Op::SMLSL_vec:
+        case Op::SMULL_vec:
+        case Op::PMULL:
+        case Op::UADDL:
+        case Op::UADDW:
+        case Op::USUBL:
+        case Op::USUBW:
+        case Op::RADDHN:
+        case Op::UABAL:
+        case Op::RSUBHN:
+        case Op::UABDL:
+        case Op::UMLAL_vec:
+        case Op::UMLSL_vec:
+        case Op::UMULL_vec:
+        case Op::SQDMULL_vec_2:
+        case Op::SQDMLAL_vec_2:
+        case Op::SQDMLSL_vec_2:
+        case Op::SQDMULL_vec_1:
+        case Op::SQDMLAL_vec_1:
+        case Op::SQDMLSL_vec_1:
+        case Op::SMLAL_elt:
+        case Op::SMLSL_elt:
+        case Op::MUL_elt:
+        case Op::SMULL_elt:
+        case Op::SQDMULL_elt_2:
+        case Op::SQDMULH_elt_2:
+        case Op::SQRDMULH_elt_2:
+        case Op::MLA_elt:
+        case Op::UMLAL_elt:
+        case Op::MLS_elt:
+        case Op::UMLSL_elt:
+        case Op::UMULL_elt:
+        case Op::SQDMLAL_elt_2:
+        case Op::SQDMLSL_elt_2:
+        case Op::SQDMLAL_elt_1:
+        case Op::SQDMLSL_elt_1:
+        case Op::SQDMULL_elt_1:
+        case Op::SQDMULH_elt_1:
+        case Op::SQRDMULH_elt_1:
+            return SimdLong(cpu, op, word);
         case Op::FMOV_3:    // half precision (ARMv8.2)
         case Op::SDOT_vec:  // ARMv8.2 and later: dot products, complex numbers, SHA-3, SHA-512, SM3, SM4
         case Op::UDOT_vec:
