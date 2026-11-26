@@ -718,6 +718,45 @@ StepResult SystemRegisterAccess(BiwaCpu& cpu, std::uint32_t word, bool read) {
     return StepResult::kOk;
 }
 
+// ---- Exclusives, load-acquire and store-release ----
+
+StepResult Exclusive(BiwaCpu& cpu, Op op, std::uint32_t word) {
+    const std::uint32_t size = word >> 30;  // pairs: 2 + sz
+    const std::uint32_t s = (word >> 16) & 31;
+    const std::uint32_t t2 = (word >> 10) & 31;
+    const std::uint32_t t = word & 31;
+    const std::uint64_t address = sem_xsp(&cpu, (word >> 5) & 31);
+    const bool pair = op == Op::LDXP || op == Op::LDAXP || op == Op::STXP || op == Op::STLXP;
+    if (!sem_is_aligned(address, pair ? 2u << size : 1u << size)) {
+        return StepResult::kAlignmentFault;
+    }
+    switch (op) {
+        case Op::LDXR:
+        case Op::LDAXR:
+            sem_ldxr(&cpu, size, t, address);
+            break;
+        case Op::LDXP:
+        case Op::LDAXP:
+            sem_ldxp(&cpu, size, t, t2, address);
+            break;
+        case Op::STXR:
+        case Op::STLXR:
+            sem_stxr(&cpu, size, s, t, address);
+            break;
+        case Op::STXP:
+        case Op::STLXP:
+            sem_stxp(&cpu, size, s, t, t2, address);
+            break;
+        case Op::LDAR:
+            sem_ldar(&cpu, size, t, address);
+            break;
+        default:  // STLR
+            sem_stlr(&cpu, size, t, address);
+            break;
+    }
+    return StepResult::kOk;
+}
+
 StepResult System(BiwaCpu& cpu, Op op, std::uint32_t word) {
     switch (op) {
         case Op::SVC:
@@ -739,6 +778,23 @@ StepResult System(BiwaCpu& cpu, Op op, std::uint32_t word) {
             return StepResult::kOk;
         case Op::ISB:
             return StepResult::kOk;
+        case Op::CLREX:
+            sem_clrex(&cpu);
+            return StepResult::kOk;
+        case Op::LDXR:
+        case Op::LDAXR:
+        case Op::LDXP:
+        case Op::LDAXP:
+        case Op::STXR:
+        case Op::STLXR:
+        case Op::STXP:
+        case Op::STLXP:
+        case Op::LDAR:
+        case Op::STLR:
+            return Exclusive(cpu, op, word);
+        case Op::LDLAR:  // ARMv8.1 (limited ordering regions)
+        case Op::STLLR:
+            return StepResult::kUndefined;
         case Op::MRS:
             return SystemRegisterAccess(cpu, word, true);
         case Op::MSR_reg:

@@ -86,7 +86,8 @@ One C function per guest function: `void f_0000000008123450(BiwaCpu *c)`, with e
 | `BR` (not a jump table) | `[[clang::musttail]] return rt_jump(c, target);` |
 | `RET` | `return;` (the runtime checks `LR` in debug builds) |
 | `SVC #n` | `rt_svc(c, n);` |
-| `LDXR` / `STXR` and pairs | Monitor in `c->excl`; the store is a compare-and-swap against the loaded value (`cmpxchg16b` for 128-bit pairs) |
+| `LDXR` / `STXR` and pairs | Monitor in `c->excl`; the store is a compare-and-swap against the loaded value (`cmpxchg16b` for 128-bit pairs); unaligned addresses raise an alignment fault, as on the A57 |
+| `LDAR` / `STLR` | Acquire load; sequentially consistent store, since `STLR` may not pass a later `LDAR` (a C release store could) |
 | `DMB` / `DSB` / `ISB` | `atomic_thread_fence` of the matching strength |
 | `DC ZVA` | Zero the 64-byte block (`DCZID_EL0` reports 64 bytes) |
 | `DC` / `IC` maintenance, `YIELD`, `WFE`, `SEV` | No-ops or `_mm_pause` |

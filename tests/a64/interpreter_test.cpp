@@ -8,6 +8,8 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <thread>
+#include <vector>
 
 #include "biwa/a64/a64_sem.h"
 
@@ -214,13 +216,72 @@ TEST(A64InterpreterTest, RunsBranchesAndSystemInstructions) {
     EXPECT_EQ(Step(cpu, 0xD500401F), StepResult::kUndefined);  // cfinv: ARMv8.4
 }
 
+TEST(A64InterpreterTest, RunsExclusivesAndOrderedAccesses) {
+    alignas(16) std::array<std::uint64_t, 4> memory{0x1111, 0x2222, 0, 0};
+    BiwaCpu cpu = Cpu();
+    cpu.x[10] = reinterpret_cast<std::uintptr_t>(memory.data());
+    cpu.x[11] = cpu.x[10] + 2;
+    ASSERT_EQ(Step(cpu, 0xC85FFD40), StepResult::kOk);  // ldaxr x0, [x10]
+    EXPECT_EQ(cpu.x[0], 0x1111u);
+    ASSERT_EQ(Step(cpu, 0xC801FD42), StepResult::kOk);  // stlxr w1, x2, [x10]
+    EXPECT_EQ(cpu.x[1], 0u);                            // stored
+    EXPECT_EQ(memory[0], cpu.x[2]);
+    ASSERT_EQ(Step(cpu, 0xC8017D42), StepResult::kOk);  // stxr w1, x2, [x10]
+    EXPECT_EQ(cpu.x[1], 1u);                            // the monitor was cleared
+    ASSERT_EQ(Step(cpu, 0xC87F1143), StepResult::kOk);  // ldxp x3, x4, [x10]
+    EXPECT_EQ(cpu.x[4], 0x2222u);
+    memory[1] = 0x3333;  // another thread's store in between
+    cpu.x[5] = 5;
+    cpu.x[6] = 6;
+    ASSERT_EQ(Step(cpu, 0xC8211945), StepResult::kOk);  // stxp w1, x5, x6, [x10]
+    EXPECT_EQ(cpu.x[1], 1u);
+    EXPECT_EQ(memory[0], cpu.x[2]);
+    const std::uint64_t pc = cpu.pc;
+    EXPECT_EQ(Step(cpu, 0x88DFFD60), StepResult::kAlignmentFault);  // ldar w0, [x11] (unaligned)
+    EXPECT_EQ(cpu.pc, pc);
+    cpu.x[2] = 0x4444;
+    ASSERT_EQ(Step(cpu, 0xC89FFD42), StepResult::kOk);  // stlr x2, [x10]
+    EXPECT_EQ(memory[0], 0x4444u);
+    ASSERT_EQ(Step(cpu, 0xC85FFD40), StepResult::kOk);  // ldaxr x0, [x10]
+    ASSERT_EQ(Step(cpu, 0xD5033F5F), StepResult::kOk);  // clrex
+    ASSERT_EQ(Step(cpu, 0xC801FD42), StepResult::kOk);  // stlxr w1, x2, [x10]
+    EXPECT_EQ(cpu.x[1], 1u);
+    EXPECT_EQ(Step(cpu, 0xC8DF7D40), StepResult::kUndefined);  // ldlar x0, [x10]: ARMv8.1
+}
+
+TEST(A64InterpreterTest, ExclusivesAreAtomicAcrossThreads) {
+    // Four guest threads each add 1 to a counter 5000 times with an exclusive loop.
+    alignas(8) std::uint64_t counter = 0;
+    constexpr int kThreads = 4;
+    constexpr int kAdds = 5000;
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&counter] {
+            BiwaCpu cpu = Cpu();
+            cpu.x[10] = reinterpret_cast<std::uintptr_t>(&counter);
+            for (int n = 0; n < kAdds; ++n) {
+                do {
+                    Step(cpu, 0xC85FFD40);  // ldaxr x0, [x10]
+                    Step(cpu, 0x91000400);  // add x0, x0, #1
+                    Step(cpu, 0xC801FD40);  // stlxr w1, x0, [x10]
+                } while (cpu.x[1] != 0);
+            }
+        });
+    }
+    for (std::thread& thread : threads) {
+        thread.join();
+    }
+    EXPECT_EQ(counter, std::uint64_t{kThreads} * kAdds);
+}
+
 TEST(A64InterpreterTest, RejectsWhatItCannotRun) {
     BiwaCpu cpu = Cpu();
     EXPECT_EQ(Step(cpu, 0x91800000), StepResult::kUndefined);       // add with a reserved shift
     EXPECT_EQ(Step(cpu, 0x8BC20020), StepResult::kUndefined);       // add (shifted) with ror
     EXPECT_EQ(Step(cpu, 0x5AC00C20), StepResult::kUndefined);       // rev with the 64-bit opc on w
     EXPECT_EQ(Step(cpu, 0x00000000), StepResult::kUndefined);       // udf
-    EXPECT_EQ(Step(cpu, 0xC85F7C20), StepResult::kNotImplemented);  // ldxr x0, [x1], not yet
+    EXPECT_EQ(Step(cpu, 0x1E222820), StepResult::kNotImplemented);  // fadd s0, s1, s2, not yet
     EXPECT_EQ(cpu.pc, 0x1000u);
 }
 

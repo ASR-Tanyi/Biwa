@@ -33,7 +33,7 @@ MSYS2 can be the shell on Windows (git, cmake, ninja from pacman), but the compi
 | `linux-release` | Linux | Same, release with debug info, libc++ linked statically | Native |
 | `lint` | Both | clang-format check, clang-tidy with warnings as errors | — |
 
-- Linux builds use Clang with libc++ as well, so both hosts compile against the same C++ library (libstdc++ 13 with Clang 18 has no `std::expected`).
+- Linux builds use Clang with libc++ as well, so both hosts compile against the same C++ library (libstdc++ 13 with Clang 18 has no `std::expected`), and the same `-march=x86-64-v3` baseline (the 16-byte compare-and-swap of the exclusive pairs needs it).
 - `linux-asan` runs tests with `ASAN_OPTIONS=alloc_dealloc_mismatch=0`: Ubuntu's split libc++ / libc++abi 18 allocate an exception's message with `operator new` in one library and release it with `free` in the other, which AddressSanitizer would report for every caught standard exception.
 - The Linux builds exist for sanitizers and fast native tests. Code that is Windows-only (window, input, audio output, the Windows memory and thread primitives) sits behind the small `platform` and `host` interfaces, which have a Linux implementation only for tests.
 - Formatting: `.clang-format` (Google style, IndentWidth 4, ColumnLimit 120) and `.clang-tidy` (bug-finding checks). Both tools pinned at one LLVM version.

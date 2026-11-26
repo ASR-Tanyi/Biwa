@@ -527,12 +527,14 @@ static inline void sem_mulh(BiwaCpu* cpu, bool is_signed, unsigned d, unsigned n
 /* NOLINTBEGIN(performance-no-int-to-ptr) */
 /* NOLINTBEGIN(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
 /* NOLINTBEGIN(clang-analyzer-unix.cstring.NullArg) */
+static inline void* sem_host(uint64_t address) { return (void*)(uintptr_t)address; }
+
 static inline void sem_copy_in(void* host, uint64_t address, unsigned bytes) {
-    __builtin_memcpy(host, (const void*)(uintptr_t)address, bytes);
+    __builtin_memcpy(host, sem_host(address), bytes);
 }
 
 static inline void sem_copy_out(uint64_t address, const void* host, unsigned bytes) {
-    __builtin_memcpy((void*)(uintptr_t)address, host, bytes);
+    __builtin_memcpy(sem_host(address), host, bytes);
 }
 /* NOLINTEND(clang-analyzer-unix.cstring.NullArg) */
 /* NOLINTEND(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling) */
@@ -711,6 +713,166 @@ static inline void sem_barrier(unsigned crm) {
 static inline void sem_dc_zva(uint64_t address) {
     const uint64_t zeros[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     sem_copy_out(address & ~(uint64_t)63, zeros, sizeof(zeros));
+}
+
+/* ---- Exclusives, load-acquire and store-release ---- */
+
+/* These accesses need their natural alignment (the whole pair for LDXP / STXP); the caller checks
+   it and raises an alignment fault otherwise, as the A57 does. */
+static inline bool sem_is_aligned(uint64_t address, unsigned bytes) { return (address & (bytes - 1)) == 0; }
+
+/* A single-copy atomic load of 1, 2, 4 or 8 bytes with acquire order. */
+static inline uint64_t sem_read_acquire(uint64_t address, unsigned bytes) {
+    void* p = sem_host(address);
+    switch (bytes) {
+        case 1:
+            return __atomic_load_n((uint8_t*)p, __ATOMIC_ACQUIRE);
+        case 2:
+            return __atomic_load_n((uint16_t*)p, __ATOMIC_ACQUIRE);
+        case 4:
+            return __atomic_load_n((uint32_t*)p, __ATOMIC_ACQUIRE);
+        default:
+            return __atomic_load_n((uint64_t*)p, __ATOMIC_ACQUIRE);
+    }
+}
+
+/* A store-release. Sequentially consistent, because ARM's STLR may not pass a later LDAR, which a
+   C release store followed by an acquire load allows. */
+static inline void sem_write_release(uint64_t address, unsigned bytes, uint64_t value) {
+    void* p = sem_host(address);
+    switch (bytes) {
+        case 1:
+            __atomic_store_n((uint8_t*)p, (uint8_t)value, __ATOMIC_SEQ_CST);
+            break;
+        case 2:
+            __atomic_store_n((uint16_t*)p, (uint16_t)value, __ATOMIC_SEQ_CST);
+            break;
+        case 4:
+            __atomic_store_n((uint32_t*)p, (uint32_t)value, __ATOMIC_SEQ_CST);
+            break;
+        default:
+            __atomic_store_n((uint64_t*)p, value, __ATOMIC_SEQ_CST);
+            break;
+    }
+}
+
+/* Compare-and-swap of 1, 2, 4 or 8 bytes. */
+static inline bool sem_cas(uint64_t address, unsigned bytes, uint64_t expected, uint64_t desired) {
+    void* p = sem_host(address);
+    switch (bytes) {
+        case 1: {
+            uint8_t e = (uint8_t)expected;
+            return __atomic_compare_exchange_n((uint8_t*)p, &e, (uint8_t)desired, false, __ATOMIC_SEQ_CST,
+                                               __ATOMIC_SEQ_CST);
+        }
+        case 2: {
+            uint16_t e = (uint16_t)expected;
+            return __atomic_compare_exchange_n((uint16_t*)p, &e, (uint16_t)desired, false, __ATOMIC_SEQ_CST,
+                                               __ATOMIC_SEQ_CST);
+        }
+        case 4: {
+            uint32_t e = (uint32_t)expected;
+            return __atomic_compare_exchange_n((uint32_t*)p, &e, (uint32_t)desired, false, __ATOMIC_SEQ_CST,
+                                               __ATOMIC_SEQ_CST);
+        }
+        default: {
+            uint64_t e = expected;
+            return __atomic_compare_exchange_n((uint64_t*)p, &e, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        }
+    }
+}
+
+/* 16 bytes, low half first in memory (cmpxchg16b, part of the x86-64-v3 baseline). */
+static inline void sem_read16_acquire(uint64_t address, uint64_t* lo, uint64_t* hi) {
+    const unsigned __int128 value = __atomic_load_n((unsigned __int128*)sem_host(address), __ATOMIC_ACQUIRE);
+    *lo = (uint64_t)value;
+    *hi = (uint64_t)(value >> 64);
+}
+
+static inline bool sem_cas16(uint64_t address, uint64_t expected_lo, uint64_t expected_hi, uint64_t lo, uint64_t hi) {
+    unsigned __int128 expected = ((unsigned __int128)expected_hi << 64) | expected_lo;
+    const unsigned __int128 desired = ((unsigned __int128)hi << 64) | lo;
+    return __atomic_compare_exchange_n((unsigned __int128*)sem_host(address), &expected, desired, false,
+                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+static inline void sem_monitor_set(BiwaCpu* cpu, uint64_t address, unsigned bytes, uint64_t lo, uint64_t hi) {
+    cpu->excl.addr = address;
+    cpu->excl.lo = lo;
+    cpu->excl.hi = hi;
+    cpu->excl.size = (uint8_t)bytes;
+    cpu->excl.valid = 1;
+}
+
+/* Whether the monitor still marks `bytes` at `address`; it is cleared either way, as every
+   store-exclusive does. */
+static inline bool sem_monitor_take(BiwaCpu* cpu, uint64_t address, unsigned bytes) {
+    const bool marked = cpu->excl.valid != 0 && cpu->excl.addr == address && cpu->excl.size == bytes;
+    cpu->excl.valid = 0;
+    return marked;
+}
+
+/* LDXR / LDAXR: load 1 << size bytes into Rt and mark them exclusive. Both have acquire order
+   (stronger than LDXR needs). */
+static inline void sem_ldxr(BiwaCpu* cpu, unsigned size, unsigned t, uint64_t address) {
+    const unsigned bytes = 1u << size;
+    const uint64_t value = sem_read_acquire(address, bytes);
+    sem_monitor_set(cpu, address, bytes, value, 0);
+    sem_set_x(cpu, t, value);
+}
+
+/* LDXP / LDAXP: two W (size 2) or two X (size 3), read as one atomic access and marked. */
+static inline void sem_ldxp(BiwaCpu* cpu, unsigned size, unsigned t, unsigned t2, uint64_t address) {
+    uint64_t lo = 0;
+    uint64_t hi = 0;
+    if (size == 2) {
+        const uint64_t value = sem_read_acquire(address, 8);
+        sem_monitor_set(cpu, address, 8, value, 0);
+        lo = (uint32_t)value;
+        hi = value >> 32;
+    } else {
+        sem_read16_acquire(address, &lo, &hi);
+        sem_monitor_set(cpu, address, 16, lo, hi);
+    }
+    sem_set_x(cpu, t, lo);
+    sem_set_x(cpu, t2, hi);
+}
+
+/* STXR / STLXR: store Rt only if the monitor still marks this address and size and memory still
+   holds what the load-exclusive read (a compare-and-swap, so another thread's store in between
+   makes it fail). Ws = 0 when stored, 1 otherwise. */
+static inline void sem_stxr(BiwaCpu* cpu, unsigned size, unsigned s, unsigned t, uint64_t address) {
+    const unsigned bytes = 1u << size;
+    const uint64_t expected = cpu->excl.lo;
+    const bool stored = sem_monitor_take(cpu, address, bytes) && sem_cas(address, bytes, expected, sem_x(cpu, t));
+    sem_set_x(cpu, s, stored ? 0 : 1);
+}
+
+/* STXP / STLXP: as STXR for the pair Rt (lower address), Rt2. */
+static inline void sem_stxp(BiwaCpu* cpu, unsigned size, unsigned s, unsigned t, unsigned t2, uint64_t address) {
+    const uint64_t expected_lo = cpu->excl.lo;
+    const uint64_t expected_hi = cpu->excl.hi;
+    bool stored = false;
+    if (sem_monitor_take(cpu, address, 2u << size)) {
+        if (size == 2) {
+            const uint64_t pair = (sem_x(cpu, t2) << 32) | (uint32_t)sem_x(cpu, t);
+            stored = sem_cas(address, 8, expected_lo, pair);
+        } else {
+            stored = sem_cas16(address, expected_lo, expected_hi, sem_x(cpu, t), sem_x(cpu, t2));
+        }
+    }
+    sem_set_x(cpu, s, stored ? 0 : 1);
+}
+
+static inline void sem_clrex(BiwaCpu* cpu) { cpu->excl.valid = 0; }
+
+/* LDAR and STLR of 1 << size bytes. */
+static inline void sem_ldar(BiwaCpu* cpu, unsigned size, unsigned t, uint64_t address) {
+    sem_set_x(cpu, t, sem_read_acquire(address, 1u << size));
+}
+
+static inline void sem_stlr(const BiwaCpu* cpu, unsigned size, unsigned t, uint64_t address) {
+    sem_write_release(address, 1u << size, sem_x(cpu, t));
 }
 
 #ifdef __cplusplus

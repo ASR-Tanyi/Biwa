@@ -15,6 +15,7 @@ enum class StepResult : std::uint8_t {
     kNotImplemented,  // an instruction the interpreter cannot run yet: pc unchanged
     kSupervisorCall,  // SVC: pc is the next instruction; the SVC number is in the word
     kBreakpoint,      // BRK: pc unchanged
+    kAlignmentFault,  // an exclusive or ordered access to an unaligned address: pc unchanged
 };
 
 // Executes `word`, the instruction at cpu.pc, through the shared semantics (biwa/a64/a64_sem.h)

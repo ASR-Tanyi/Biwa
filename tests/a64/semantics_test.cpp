@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
+#include <numeric>
 #include <random>
 #include <span>
 #include <stdexcept>
@@ -95,7 +96,7 @@ void Compare(const biwa::a64::OpInfo& info, std::uint32_t word, StepResult resul
              const UnicornCpu::Outcome& reference, Tally& tally) {
     ++tally.run;
     if (result == StepResult::kUndefined || result == StepResult::kSupervisorCall ||
-        result == StepResult::kBreakpoint) {
+        result == StepResult::kBreakpoint || result == StepResult::kAlignmentFault) {
         ++tally.exceptions;
         EXPECT_FALSE(reference.completed) << std::format("{:08x}: Biwa takes an exception, Unicorn runs it", word);
         return;
@@ -185,6 +186,53 @@ class GuestBlock {
     std::uint8_t* data_ = nullptr;
 };
 
+// A block of random guest memory, mapped in Unicorn too, for the tests that touch memory or branch.
+class MemoryRig {
+   public:
+    explicit MemoryRig(std::mt19937_64& rng) : unicorn_(Fill(block_, rng), GuestBlock::kSize) {
+        unicorn_.WriteData(0, block_.Bytes());
+    }
+
+    // A base address: kBaseOffset into the block, up to 4 KiB either side.
+    [[nodiscard]] std::uint64_t Base(std::mt19937_64& rng) const {
+        return block_.Address() + GuestBlock::kBaseOffset + (rng() % 0x2000) - 0x1000;
+    }
+
+    // Where the instructions go.
+    [[nodiscard]] std::uint64_t Code(std::mt19937_64& rng) const {
+        return block_.Address() + GuestBlock::kCodeOffset + 4 * (rng() % 0x100);
+    }
+
+    // Writes `words` at in.pc in the block (Unicorn's copy gets them from Run) and runs Unicorn.
+    UnicornCpu::Outcome Run(const CpuState& in, std::span<const std::uint32_t> words) {
+        std::memcpy(&block_.Bytes()[in.pc - block_.Address()], words.data(), words.size_bytes());
+        return unicorn_.Run(in, words);
+    }
+
+    // Where Biwa's block and Unicorn's differ, or "" when they do not.
+    std::string MemoryDiff() {
+        unicorn_.ReadData(0, reference_);
+        if (std::memcmp(reference_.data(), block_.Bytes().data(), GuestBlock::kSize) == 0) {
+            return "";
+        }
+        const auto mismatch = std::ranges::mismatch(reference_, block_.Bytes());
+        return std::format("memory differs at block offset {:#x}", mismatch.in1 - reference_.begin());
+    }
+
+   private:
+    static std::uint64_t Fill(const GuestBlock& block, std::mt19937_64& rng) {
+        for (std::size_t i = 0; i < GuestBlock::kSize; i += 8) {
+            const std::uint64_t value = rng();
+            std::memcpy(&block.Bytes()[i], &value, 8);
+        }
+        return block.Address();
+    }
+
+    GuestBlock block_;
+    UnicornCpu unicorn_;
+    std::vector<std::uint8_t> reference_ = std::vector<std::uint8_t>(GuestBlock::kSize);
+};
+
 // A random encoding whose addresses stay in the block: pc-relative offsets (literals, branches)
 // are cut to +-16 KiB; the instruction sits in the middle of the block.
 std::uint32_t RandomAccess(Op op, std::mt19937_64& rng) {
@@ -208,6 +256,46 @@ std::uint32_t RandomAccess(Op op, std::mt19937_64& rng) {
 // The register that holds an address: Rn, or Rt for DC ZVA.
 char AddressRegister(Op op) { return op == Op::DC_ZVA ? 't' : 'n'; }
 
+bool IsExclusiveOrOrdered(Op op) {
+    switch (op) {
+        case Op::LDXR:
+        case Op::LDAXR:
+        case Op::LDXP:
+        case Op::LDAXP:
+        case Op::STXR:
+        case Op::STLXR:
+        case Op::STXP:
+        case Op::STLXP:
+        case Op::LDAR:
+        case Op::STLR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The CONSTRAINED UNPREDICTABLE register choices of the exclusives, which compilers never emit:
+// the status register also a source or the base, or a load pair into one register twice.
+bool Unpredictable(Op op, std::uint32_t word) {
+    const std::uint32_t s = (word >> 16) & 31;
+    const std::uint32_t t2 = (word >> 10) & 31;
+    const std::uint32_t n = (word >> 5) & 31;
+    const std::uint32_t t = word & 31;
+    switch (op) {
+        case Op::STXR:
+        case Op::STLXR:
+            return s == t || (s == n && n != 31);
+        case Op::STXP:
+        case Op::STLXP:
+            return s == t || s == t2 || (s == n && n != 31);
+        case Op::LDXP:
+        case Op::LDAXP:
+            return t == t2;
+        default:
+            return false;
+    }
+}
+
 class MemorySemanticsTest : public testing::TestWithParam<Op> {};
 
 // As SemanticsTest, with the address register pointing into a block of random memory, pc inside
@@ -217,30 +305,25 @@ TEST_P(MemorySemanticsTest, MatchesUnicorn) {
     const Op op = GetParam();
     const biwa::a64::OpInfo& info = biwa::a64::Info(op);
     std::mt19937_64 rng(Seed(op));
-    GuestBlock block;
-    for (std::size_t i = 0; i < GuestBlock::kSize; i += 8) {
-        const std::uint64_t value = rng();
-        std::memcpy(&block.Bytes()[i], &value, 8);
-    }
-    UnicornCpu unicorn(block.Address(), GuestBlock::kSize);
-    unicorn.WriteData(0, block.Bytes());
-    std::vector<std::uint8_t> reference_memory(GuestBlock::kSize);
+    MemoryRig rig(rng);
     const char address_letter = AddressRegister(op);
     const bool has_base = HasField(op, address_letter);
     const bool has_index = HasField(op, 'm');
     Tally tally;
     for (int tries = 0; tally.run < kSamples && tries < kSamples * 50; ++tries) {
         const std::uint32_t word = RandomAccess(op, rng);
-        if (biwa::a64::Decode(word) != op) {
+        if (biwa::a64::Decode(word) != op || Unpredictable(op, word)) {
             continue;
         }
         CpuState in = biwa::test::RandomState(rng);
-        const std::uint64_t base = block.Address() + GuestBlock::kBaseOffset + (rng() % 0x2000) - 0x1000;
+        const std::uint64_t base = rig.Base(rng);
         in.sp = base & ~std::uint64_t{0xF};
-        in.pc = block.Address() + GuestBlock::kCodeOffset + 4 * (rng() % 0x100);
+        in.pc = rig.Code(rng);
         const std::uint32_t n = biwa::a64::Field(op, word, address_letter);
         if (has_base && n != 31) {
-            in.x[n] = (rng() % 4 == 0) ? base & ~std::uint64_t{0xF} : base;
+            // Exclusive and ordered accesses aligned: Unicorn 2.1 skips the alignment check on
+            // LDAR / STLR and on failing store-exclusives (the fixed tests cover the faults).
+            in.x[n] = (IsExclusiveOrOrdered(op) || rng() % 4 == 0) ? base & ~std::uint64_t{0xF} : base;
         }
         const bool is_branch = op == Op::BR || op == Op::BLR || op == Op::RET;
         if ((is_branch || address_letter == 't') && n == 31) {
@@ -267,17 +350,12 @@ TEST_P(MemorySemanticsTest, MatchesUnicorn) {
                 in.x[m] = value;
             }
         }
-        const std::uint64_t code_offset = in.pc - block.Address();
-        std::memcpy(&block.Bytes()[code_offset], &word, 4);
+        const std::array<std::uint32_t, 1> words{word};
+        const UnicornCpu::Outcome reference = rig.Run(in, words);
         BiwaCpu cpu = biwa::test::ToBiwa(in);
         const StepResult result = biwa::a64::Step(cpu, word);
-        const UnicornCpu::Outcome reference = unicorn.Run(in, std::array<std::uint32_t, 1>{word});
-        unicorn.ReadData(0, reference_memory);
-        if (std::memcmp(reference_memory.data(), block.Bytes().data(), GuestBlock::kSize) != 0) {
-            const auto mismatch = std::ranges::mismatch(reference_memory, block.Bytes());
-            FAIL() << std::format("{:08x} ({}): memory differs at block offset {:#x}", word, info.name,
-                                  mismatch.in1 - reference_memory.begin());
-        }
+        const std::string memory = rig.MemoryDiff();
+        ASSERT_EQ(memory, "") << std::format("{:08x} ({})", word, info.name);
         Compare(info, word, result, cpu, reference, tally);
         if (HasFatalFailure()) {
             return;
@@ -285,6 +363,72 @@ TEST_P(MemorySemanticsTest, MatchesUnicorn) {
     }
     EXPECT_EQ(tally.run, kSamples);
     EXPECT_LT(tally.exceptions, tally.run);
+}
+
+// Load-exclusive then store-exclusive (of the given form), sometimes with CLREX in between or the
+// store to another address: the store succeeds only in the plain case, in Biwa as in Unicorn.
+class ExclusiveSequenceTest : public testing::TestWithParam<Op> {};
+
+TEST_P(ExclusiveSequenceTest, MatchesUnicorn) {
+    const Op store = GetParam();
+    const bool pair = store == Op::STXP || store == Op::STLXP;
+    std::mt19937_64 rng(Seed(store));
+    MemoryRig rig(rng);
+    int stored = 0;
+    int run = 0;
+    while (run < kSamples) {
+        // Distinct registers: base n, load into t (and t2), status s, store from u (and u2), and m,
+        // the base for the other-address case. Sometimes SP as the base, XZR as status or source.
+        std::array<std::uint32_t, 31> order{};
+        std::iota(order.begin(), order.end(), 0u);
+        std::shuffle(order.begin(), order.end(), rng);
+        const auto sometimes_31 = [&](std::uint32_t r) { return rng() % 8 == 0 ? 31u : r; };
+        const std::uint32_t n = sometimes_31(order[0]);
+        const std::uint32_t t = order[1];
+        const std::uint32_t t2 = order[2];
+        const std::uint32_t s = sometimes_31(order[3]);
+        const std::uint32_t u = sometimes_31(order[4]);
+        const std::uint32_t u2 = sometimes_31(order[5]);
+        const std::uint32_t m = order[6];
+        const std::uint32_t size =
+            pair ? 2 + static_cast<std::uint32_t>(rng() % 2) : static_cast<std::uint32_t>(rng() % 4);
+        const bool acquire = rng() % 2 != 0;
+        const Op load = pair ? (acquire ? Op::LDAXP : Op::LDXP) : (acquire ? Op::LDAXR : Op::LDXR);
+        const std::uint32_t size_bits = pair ? (size - 2) << 30 : size << 30;
+        const std::uint32_t load_word = biwa::a64::Info(load).value | size_bits | (pair ? t2 << 10 : 0) | (n << 5) | t;
+        const int variant = static_cast<int>(rng() % 4);  // 0: CLREX between, 1: other address, else plain
+        const std::uint32_t store_base = variant == 1 ? m : n;
+        const std::uint32_t store_word =
+            biwa::a64::Info(store).value | size_bits | (s << 16) | (pair ? u2 << 10 : 0) | (store_base << 5) | u;
+        CpuState in = biwa::test::RandomState(rng);
+        const std::uint64_t base = rig.Base(rng) & ~std::uint64_t{0xF};
+        in.sp = base;
+        if (n != 31) {
+            in.x[n] = base;
+        }
+        in.x[m] = base + 16;
+        in.pc = rig.Code(rng);
+        std::vector<std::uint32_t> words{load_word};
+        if (variant == 0) {
+            words.push_back(biwa::a64::Info(Op::CLREX).value | static_cast<std::uint32_t>(rng() % 16) << 8);
+        }
+        words.push_back(store_word);
+        const UnicornCpu::Outcome reference = rig.Run(in, words);
+        BiwaCpu cpu = biwa::test::ToBiwa(in);
+        for (const std::uint32_t word : words) {
+            ASSERT_EQ(biwa::a64::Step(cpu, word), StepResult::kOk) << std::format("{:08x}", word);
+        }
+        ASSERT_TRUE(reference.completed) << reference.error;
+        ASSERT_EQ(rig.MemoryDiff(), "") << std::format("{:08x} {:08x}", load_word, store_word);
+        const std::string diff = biwa::test::Diff(reference.state, biwa::test::FromBiwa(cpu));
+        ASSERT_EQ(diff, "") << std::format("{:08x} {:08x}, Unicorn != Biwa:\n", load_word, store_word) << diff;
+        if (s != 31) {
+            EXPECT_EQ(cpu.x[s] == 0, variant >= 2) << std::format("{:08x} {:08x}", load_word, store_word);
+            stored += cpu.x[s] == 0 ? 1 : 0;
+        }
+        ++run;
+    }
+    EXPECT_GT(stored, kSamples / 4);
 }
 
 std::string Name(const testing::TestParamInfo<Op>& param) { return std::string(biwa::a64::Info(param.param).id); }
@@ -332,6 +476,14 @@ INSTANTIATE_TEST_SUITE_P(Structures, MemorySemanticsTest,
                                          Op::LD4R_1, Op::LD4R_2),
                          Name);
 
+// Exclusives, load-acquire and store-release; CLREX.
+INSTANTIATE_TEST_SUITE_P(Exclusives, MemorySemanticsTest,
+                         testing::Values(Op::LDXR, Op::LDAXR, Op::LDXP, Op::LDAXP, Op::STXR, Op::STLXR, Op::STXP,
+                                         Op::STLXP, Op::LDAR, Op::STLR),
+                         Name);
+INSTANTIATE_TEST_SUITE_P(Exclusives, ExclusiveSequenceTest, testing::Values(Op::STXR, Op::STLXR, Op::STXP, Op::STLXP),
+                         Name);
+
 // Branches (in the block, so the targets are mapped) and DC ZVA.
 INSTANTIATE_TEST_SUITE_P(Branches, MemorySemanticsTest,
                          testing::Values(Op::B_uncond, Op::BL, Op::B_cond, Op::CBZ, Op::CBNZ, Op::TBZ, Op::TBNZ, Op::BR,
@@ -340,15 +492,15 @@ INSTANTIATE_TEST_SUITE_P(Branches, MemorySemanticsTest,
 
 // System instructions that run at EL0.
 INSTANTIATE_TEST_SUITE_P(System, SemanticsTest,
-                         testing::Values(Op::HINT, Op::NOP, Op::YIELD, Op::WFE, Op::WFI, Op::SEV, Op::SEVL, Op::DSB,
-                                         Op::DMB, Op::ISB, Op::MRS, Op::MSR_reg, Op::DC_CVAC, Op::DC_CVAU, Op::DC_CIVAC,
-                                         Op::IC_IVAU),
+                         testing::Values(Op::HINT, Op::NOP, Op::YIELD, Op::WFE, Op::WFI, Op::SEV, Op::SEVL, Op::CLREX,
+                                         Op::DSB, Op::DMB, Op::ISB, Op::MRS, Op::MSR_reg, Op::DC_CVAC, Op::DC_CVAU,
+                                         Op::DC_CIVAC, Op::IC_IVAU),
                          Name);
 
 INSTANTIATE_TEST_SUITE_P(System, ExceptionTest,
-                         testing::Values(Op::SVC, Op::BRK, Op::DC_IVAC, Op::DC_ISW, Op::DC_CSW, Op::DC_CISW,
-                                         Op::IC_IALLU, Op::IC_IALLUIS, Op::DC_CVAP, Op::CFINV, Op::RMIF, Op::XAFlag,
-                                         Op::AXFlag),
+                         testing::Values(Op::SVC, Op::BRK, Op::LDLAR, Op::STLLR, Op::DC_IVAC, Op::DC_ISW, Op::DC_CSW,
+                                         Op::DC_CISW, Op::IC_IALLU, Op::IC_IALLUIS, Op::DC_CVAP, Op::CFINV, Op::RMIF,
+                                         Op::XAFlag, Op::AXFlag),
                          Name);
 
 }  // namespace
